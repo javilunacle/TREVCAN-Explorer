@@ -42,6 +42,7 @@ const VCU_FRAME_SIGNALS = {
   ],
   VCU_Config: [
     'VCU_Max_Torque',
+    'VCU_Max_Speed_MPH',
     'VCU_Motor_Direction',
     'VCU_Regen_Enabled',
     'VCU_Regen_SOC_Gate_Enabled',
@@ -145,6 +146,7 @@ const CONFIG_OPTION_GROUPS = [
     label: 'GENERAL',
     options: [
       { value: 0, label: 'MAX_TORQUE' },
+      { value: 50, label: 'MAX_SPEED_MPH' },
       { value: 1, label: 'MOTOR_DIRECTION' },
       { value: 4, label: 'WHEEL_DIAMETER' },
       { value: 11, label: 'POWER_LIMIT_ENABLED' },
@@ -214,6 +216,7 @@ const CONFIG_READBACK_GROUPS = [
     title: 'General',
     fields: [
       ['VCU_Max_Torque', 'Max torque'],
+      ['VCU_Max_Speed_MPH', 'Max speed'],
       ['VCU_Motor_Direction', 'Motor direction', DIRECTION_LABELS],
       ['VCU_Wheel_Diameter', 'Wheel diameter'],
       ['VCU_Power_Limit_Enabled', 'Power limit enabled', BOOLEAN_LABELS],
@@ -839,6 +842,12 @@ function VCUDashboard({ messages, dbcFiles = [], onSendMessage, staleTimeoutMs =
               <label>
                 Launch final torque (Nm)
                 <input type="number" min="0" max="230" step="1" value={config.launchTorqueFinal} onChange={(event) => setConfig((prev) => ({ ...prev, launchTorqueFinal: event.target.value }))} />
+              </label>
+            )}
+            {mux === 50 && (
+              <label>
+                Max speed (mph)
+                <input type="number" min="0" max="419" step="1" value={config.maxSpeedMph} onChange={(event) => setConfig((prev) => ({ ...prev, maxSpeedMph: event.target.value }))} />
               </label>
             )}
             <button type="button" onClick={handleSendConfig} disabled={sendBusy}>

@@ -24,6 +24,7 @@ export const clampNumber = (value, min, max, fallback = min) => {
 
 export const createDefaultVcuConfig = () => ({
   maxTorqueNm: 0,
+  maxSpeedMph: 0,
   motorDirection: 1,
   regenEnabled: false,
   regenSocGateEnabled: false,
@@ -65,6 +66,7 @@ export const createDefaultVcuConfig = () => ({
 
 export const getVcuConfigFromSignals = (getSignal) => ({
   maxTorqueNm: getNumeric(getSignal('VCU_Max_Torque')) ?? 0,
+  maxSpeedMph: getNumeric(getSignal('VCU_Max_Speed_MPH')) ?? 0,
   motorDirection: getNumeric(getSignal('VCU_Motor_Direction')) ?? 1,
   regenEnabled: bitValue(getSignal('VCU_Regen_Enabled')) ?? false,
   regenSocGateEnabled: bitValue(getSignal('VCU_Regen_SOC_Gate_Enabled')) ?? false,
@@ -110,6 +112,7 @@ export const buildVcuConfigFrame = (mux, config) => {
   const view = new DataView(bytes.buffer);
 
   if (mux === 0) view.setUint16(1, Math.round(clampNumber(config.maxTorqueNm, 0, 230, 0)), true);
+  if (mux === 50) view.setUint16(1, Math.round(clampNumber(config.maxSpeedMph, 0, 419, 0)), true);
   if (mux === 1) bytes[1] = Number(config.motorDirection) ? 1 : 0;
   if (mux === 2) bytes[1] = config.regenEnabled ? 1 : 0;
   if (mux === 3) {
