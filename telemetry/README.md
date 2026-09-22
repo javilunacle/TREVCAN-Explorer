@@ -197,3 +197,151 @@ MOBO, and inverter panels. It is still a first-pass signal browser, not a
 pixel-for-pixel replacement for the React dashboards. This simulation does
 not validate real CAN wiring, DBC correctness on the actual car, or hardware
 throughput. Do not run `--interface can0` for this replay exercise.
+
+## Telemetry Pi startup
+
+The Pi-specific stack keeps InfluxDB private on loopback, exposes Grafana to
+the LAN on port 3000, persists all three databases in Docker volumes or the
+host data directory, and provisions the current datasource and dashboard
+drafts automatically.
+
+On the telemetry Pi, from the repository root:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install cantools
+cp .env.telemetry.example .env.telemetry
+nano .env.telemetry
+chmod 600 .env.telemetry
+bash telemetry/start_server_pi.sh
+```
+
+Replace every example secret in `.env.telemetry`. `TELEMETRY_TOKEN` must be
+the same shared value used by the car Pi. `INFLUXDB_TOKEN` should be a separate,
+long random value. The two admin passwords protect the web applications.
+Never commit `.env.telemetry`; it is ignored by Git.
+
+The startup script renders provisioning-compatible copies of the two Grafana
+drafts, starts the services in `docker-compose.telemetry-pi.yml`, and then runs
+the durable receiver in the foreground. Stop the receiver with Ctrl+C; Docker
+services remain running. Restart it with the same script and data paths.
+
+For the current LAN layout, the car Pi sends to `192.168.0.110:8765`, and
+viewers open `http://192.168.0.110:3000`. The server archive defaults to
+`~/trevcan-data/telemetry-server.sqlite3`. Check it from another SSH session:
+
+```bash
+.venv/bin/python -m telemetry.server --status \
+  --db ~/trevcan-data/telemetry-server.sqlite3
+```
+
+This is a manual foreground startup script, not yet a systemd boot service.
+Run and validate the complete two-Pi outage test before enabling automatic
+startup on a vehicle.
+
+## Car Pi startup
+
+The current two-Pi demo uses these LAN assignments. Reserve both addresses in
+the router so DHCP does not change them:
+
+| Role | Model | Hostname | Username | LAN address |
+| --- | --- | --- | --- | --- |
+| Raw-frame sender | Pi 3 | `trevcan-pi` | `pi4` | `192.168.0.100` |
+| Telemetry server | Pi 4 | `telemetry-pi` | `pi` | `192.168.0.110` |
+
+The car Pi needs only Python, the `telemetry` package files, and the generated
+raw replay file. It does not need Docker, InfluxDB, Grafana, `cantools`, or any
+DBC files. For the current manually copied layout, confirm these exist:
+
+```text
+/home/pi4/telemetry/__init__.py
+/home/pi4/telemetry/common.py
+/home/pi4/telemetry/car.py
+/home/pi4/telemetry-demo.jsonl
+```
+
+Wait until the telemetry Pi prints
+`[server] listening on 0.0.0.0:8765`. Then connect to the car Pi:
+
+```powershell
+ssh pi4@192.168.0.100
+```
+
+Enter the exact same shared `TELEMETRY_TOKEN` configured in the telemetry Pi's
+`.env.telemetry` file. This is not the InfluxDB token:
+
+```bash
+read -rsp 'Shared Pi3-Pi4 token: ' TELEMETRY_TOKEN
+echo
+export TELEMETRY_TOKEN
+```
+
+Start the full synthetic raw-frame replay:
+
+```bash
+cd ~
+python3 -m telemetry.car \
+  --simulate-file ~/telemetry-demo.jsonl \
+  --replay-rate 50 \
+  --host 192.168.0.110 \
+  --port 8765 \
+  --db ~/telemetry-all-signals.sqlite3
+```
+
+The expected startup includes `[car]` and `[simulation]` messages followed by
+periodic `[spool]` status. A small fluctuating `queued` value is normal while
+new frames are being captured and older frames are acknowledged. Check the
+spool from a second SSH session without stopping the sender:
+
+```bash
+cd ~
+python3 -m telemetry.car --status \
+  --db ~/telemetry-all-signals.sqlite3
+```
+
+`--replay-rate` is the **total aggregate frame rate**, not a rate per message.
+The initial value of 50 frames/second is a safe functional smoke test. Because
+the replay rotates through 271 distinct message types, each type appears only
+about once every 5.4 seconds at that setting; this is not a realistic vehicle
+cadence.
+
+Do not infer a full-bus rate from the current DBC files. Only 24 of the 271
+selected telemetry messages declare a cycle time. Those 24 definitions alone
+sum to approximately 1,531 frames/second, while the other 247 messages have no
+declared rate. Measure the actual car bus or obtain an approved message-rate
+table before choosing the final target. A uniform replay also cannot reproduce
+the true mix of fast and slow messages; exact timing requires replaying a
+timestamped capture or adding a per-message scheduler.
+
+For throughput testing, increase the aggregate rate in stages (for example,
+50, 250, 500, 1000, and then the measured target). At each stage, verify that
+the Pi 3 `queued` count does not trend upward indefinitely and that the Pi 4
+`pending_influx` count remains bounded and recovers to zero after input stops.
+This establishes the sustainable end-to-end rate on the actual hardware; the
+unit tests do not establish that limit.
+
+If the server or network disappears, the sender prints `[sender] disconnected`,
+continues adding frames to the same SQLite spool, and retries the connection.
+After the Pi 4 returns, `queued` should drain and `last_acked` should advance.
+Do not delete the spool between outage and reconnect tests. Stop the foreground
+sender with Ctrl+C.
+
+View the provisioned dashboards from another device on the same non-isolated
+LAN at `http://192.168.0.110:3000`. No internet port forwarding is required.
+
+For a later real-car test, first configure and verify SocketCAN `can0` with the
+team-approved bitrate. Then replace the replay arguments with `--interface
+can0` and use a separate persistent spool path:
+
+```bash
+cd ~
+python3 -m telemetry.car \
+  --interface can0 \
+  --host 192.168.0.110 \
+  --port 8765 \
+  --db ~/telemetry-real-can.sqlite3
+```
+
+Do not run the replay and real-CAN commands simultaneously. Real SocketCAN
+capture, sustained vehicle bus throughput, and power-loss behavior remain
+hardware tests; the synthetic replay does not prove them.
