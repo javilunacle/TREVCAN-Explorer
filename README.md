@@ -75,3 +75,10 @@ Supported CAN hardware / servers
 - Network CAN server (`host:port`)
 - Bluetooth CAN server (Windows)
 
+Reliable raw-CAN transport prototype
+------------------------------------
+For the separate Pi-to-laptop SQLite spool, sequenced TCP receiver, off-car DBC
+decoding, and InfluxDB/Grafana simulation walkthrough, see
+[`telemetry/README.md`](telemetry/README.md). This does not replace the React
+explorer or change the existing (lossy) `StreamForwarder` path.
+
