@@ -18,7 +18,9 @@ already in Grafana.
 
 Importing these files does not change the running receiver or InfluxDB. The
 queries assume bucket `home` and Grafana's dashboard time range. The draft
-dashboards refresh every five seconds.
+dashboards refresh every five seconds by default. The telemetry-Pi deployment
+also allows selecting a one-second refresh interval when a faster live view is
+useful.
 
 The CAN Explorer draft has a combined raw-and-decoded frame table (`can_frame`)
 and graphs driven by decoded signals (`can_signal`). New exports put the DBC
