@@ -80,6 +80,15 @@ class GrafanaDashboardTests(unittest.TestCase):
         self.assertEqual(variables[0]["name"], "bms_module")
         self.assertEqual(variables[0]["query"], "0,1,2,3,4,5")
 
+    def test_live_panels_bound_the_number_of_returned_points(self):
+        for _, dashboard in organized_dashboards():
+            for panel in dashboard["panels"]:
+                query = panel["targets"][0]["query"]
+                if panel["type"] == "timeseries":
+                    self.assertIn("aggregateWindow(every: v.windowPeriod, fn: last", query)
+                elif panel["type"] in {"stat", "bargauge"}:
+                    self.assertIn("|> last()", query)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ inverter, master/VCU, then MOBO.
 DATASOURCE = {"type": "influxdb", "uid": "trevcan-influxdb"}
 
 
-def _signal_query(condition, *, dbc=None, latest=False, table=False):
+def _signal_query(condition, *, dbc=None, latest=False, table=False, aggregate=False):
     filters = [
         'r._measurement == "can_signal"',
         'r._field == "value"',
@@ -25,6 +25,8 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False):
     )
     if latest:
         query += '\n  |> last()'
+    elif aggregate:
+        query += '\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)'
     if table:
         query += (
             '\n  |> group()'
@@ -67,7 +69,7 @@ def timeseries(panel_id, title, condition, grid, *, dbc=None, unit=None,
         "description": description,
         "gridPos": grid,
         "datasource": DATASOURCE,
-        "targets": [_target(_signal_query(condition, dbc=dbc))],
+        "targets": [_target(_signal_query(condition, dbc=dbc, aggregate=True))],
         "fieldConfig": {
             "defaults": _field_defaults(
                 unit, minimum=minimum, maximum=maximum, decimals=decimals
@@ -99,7 +101,7 @@ def stat(panel_id, title, signal, grid, *, dbc=None, unit=None,
         "description": description,
         "gridPos": grid,
         "datasource": DATASOURCE,
-        "targets": [_target(_signal_query(condition, dbc=dbc))],
+        "targets": [_target(_signal_query(condition, dbc=dbc, latest=True))],
         "fieldConfig": {
             "defaults": _field_defaults(
                 unit, minimum=minimum, maximum=maximum, decimals=decimals
