@@ -3,11 +3,15 @@
 import json
 from pathlib import Path
 
+try:
+    from .dashboard_specs import organized_dashboards
+except ImportError:  # Direct script execution on the telemetry Pi.
+    from dashboard_specs import organized_dashboards
+
 
 DIRECTORY = Path(__file__).resolve().parent
 SOURCE_FILES = (
     DIRECTORY / "trevcan-can-explorer.draft.json",
-    DIRECTORY / "trevcan-systems.draft.json",
 )
 OUTPUT_DIRECTORY = DIRECTORY / "generated"
 
@@ -31,10 +35,17 @@ def render():
         destination = OUTPUT_DIRECTORY / source.name.replace(".draft", "")
         destination.write_text(json.dumps(dashboard, indent=2) + "\n", encoding="utf-8")
         written.append(destination)
+    for filename, dashboard in organized_dashboards():
+        destination = OUTPUT_DIRECTORY / filename
+        destination.write_text(json.dumps(dashboard, indent=2) + "\n", encoding="utf-8")
+        written.append(destination)
+    expected = {path.name for path in written}
+    for stale in OUTPUT_DIRECTORY.glob("*.json"):
+        if stale.name not in expected:
+            stale.unlink()
     return written
 
 
 if __name__ == "__main__":
     for path in render():
         print(path)
-

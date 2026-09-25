@@ -328,20 +328,145 @@ sender with Ctrl+C.
 
 View the provisioned dashboards from another device on the same non-isolated
 LAN at `http://192.168.0.110:3000`. No internet port forwarding is required.
+The `TREVCAN` folder contains separate Vehicle Overview, BMS, HVC, Inverter,
+VCU, and MOBO dashboards plus the combined raw/decoded CAN Explorer. Grafana
+is read-only with respect to the vehicle: React controls that reset devices,
+change configuration, or transmit CAN frames are intentionally not reproduced.
 
-For a later real-car test, first configure and verify SocketCAN `can0` with the
-team-approved bitrate. Then replace the replay arguments with `--interface
-can0` and use a separate persistent spool path:
+## Real car: CANable and classical CAN
+
+Treat this as a supervised, stationary vehicle test and follow the team's
+electrical/tractive-system safety procedure. The telemetry capture process is a
+passive SocketCAN reader, but do not stop unknown vehicle services or change a
+CAN bitrate without identifying their owners and getting approval.
+
+The CANable hardware is the physical USB-to-CAN adapter. SocketCAN is the Linux
+kernel interface exposed by its driver. The sender reads that interface; it
+does not access the adapter directly and it does not transmit frames. Classical
+CAN normally appears with an MTU of 16 rather than the CAN-FD MTU of 72.
+
+Before changing services, inspect the car Pi:
+
+```bash
+hostname
+hostname -I
+uname -m
+python3 --version
+systemctl is-active trevcan-explorer.service || true
+systemctl --type=service --state=running --no-pager
+ip -brief link show type can
+ip -details -statistics link show can0
+readlink -f /sys/class/net/can0/device/driver || true
+```
+
+If `can0` is already `UP`, shows the team-approved classical-CAN bitrate, and
+the old Explorer receives frames from it, do not take it down or reconfigure
+it. SocketCAN supports multiple passive listeners, so the Explorer and reliable
+sender can usually read concurrently. First verify reception without writing:
+
+```bash
+candump -L -n 20 can0
+```
+
+If `candump` is unavailable, install the distribution's `can-utils` package
+only with the team administrator's approval. Do not use `cansend`, enable test
+modes, or start any replay process on the live vehicle bus.
+
+The old Explorer only needs to be stopped if the service owner confirms it is
+safe and it is reconfiguring the interface, transmitting unwanted test traffic,
+duplicating the old Influx forwarding path, or consuming too many resources.
+Inspect its status and logs first:
+
+```bash
+sudo systemctl status trevcan-explorer.service --no-pager
+sudo journalctl -u trevcan-explorer.service -n 100 --no-pager
+```
+
+If an approved test requires stopping that specific service, record whether it
+was active, stop only that named service, and restore it after the test:
+
+```bash
+sudo systemctl stop trevcan-explorer.service
+# run the capture test
+sudo systemctl start trevcan-explorer.service
+```
+
+Do not stop other dashboard, logging, router, safety, or CAN-interface services
+merely because they are running.
+
+### Install the isolated raw sender
+
+The reliable sender needs `telemetry/__init__.py`, `telemetry/common.py`, and
+`telemetry/car.py`; it does not need a DBC. Keeping those files in the car
+user's home directory avoids replacing the existing Explorer checkout. From
+the laptop repository, substitute the actual car username and IP:
+
+```powershell
+ssh CAR_USER@CAR_PI_IP "mkdir -p ~/telemetry"
+scp .\telemetry\__init__.py .\telemetry\common.py .\telemetry\car.py CAR_USER@CAR_PI_IP:~/telemetry/
+```
+
+On the car Pi, use a small virtual environment so the old application remains
+untouched:
+
+```bash
+python3 -m venv ~/trevcan-telemetry-venv
+~/trevcan-telemetry-venv/bin/pip install python-can
+```
+
+Compare `date -Is` on the car and telemetry Pis before capture. Their clocks
+must agree because the car timestamp becomes the InfluxDB/Grafana timestamp.
+On an isolated LAN where NTP is active but unsynchronized, a temporary manual
+sync from the car Pi is:
+
+```bash
+sudo date -s "$(ssh pi@192.168.0.110 'date -Is')"
+```
+
+Use the same shared `TELEMETRY_TOKEN` as the telemetry Pi, but never use or copy
+the InfluxDB token onto the car. Start the telemetry-Pi receiver first. Then on
+the car Pi:
 
 ```bash
 cd ~
-python3 -m telemetry.car \
+read -rsp 'Shared car-telemetry token: ' TELEMETRY_TOKEN
+echo
+export TELEMETRY_TOKEN
+
+~/trevcan-telemetry-venv/bin/python -m telemetry.car \
   --interface can0 \
   --host 192.168.0.110 \
   --port 8765 \
   --db ~/telemetry-real-can.sqlite3
 ```
 
-Do not run the replay and real-CAN commands simultaneously. Real SocketCAN
-capture, sustained vehicle bus throughput, and power-loss behavior remain
-hardware tests; the synthetic replay does not prove them.
+Use a new spool filename for the first pairing with a new/empty server archive.
+The spool's car ID and sequence history must match the durable server history;
+reusing an advanced spool against an empty server is correctly rejected as a
+sequence gap. Do not delete either database during an outage/reconnect test.
+
+Verify the car status from a second SSH session:
+
+```bash
+~/trevcan-telemetry-venv/bin/python -m telemetry.car --status \
+  --db ~/telemetry-real-can.sqlite3
+```
+
+Verify the telemetry Pi from another session:
+
+```bash
+cd ~/TREVCAN-Explorer
+.venv/bin/python -m telemetry.server --status \
+  --db ~/trevcan-data/telemetry-server.sqlite3
+```
+
+The initial pass proves live capture only when raw counts and acknowledged
+sequences advance, `pending_influx` returns to zero, and Grafana shows current
+timestamps. Then perform the controlled outage test: disconnect only the
+sender-to-server network path, confirm the car `queued` count rises, reconnect,
+and confirm it drains without sequence gaps.
+
+Do not run synthetic replay and `--interface can0` capture with the same spool
+or at the same time. Real SocketCAN capture, sustained vehicle-bus throughput,
+CANable/kernel buffer loss, power-loss behavior, and dashboard correctness are
+hardware tests; synthetic replay does not prove them.
