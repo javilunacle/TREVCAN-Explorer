@@ -7,7 +7,7 @@ the laptop. The car agent does not load a DBC or contact InfluxDB.
 ```text
 Pi:      SocketCAN bus(es) -> bounded RAM queue -> batched SQLite spool -> TCP batches
 Laptop:  TCP receiver -> batched SQLite raw commit -> cumulative durable ACK
-                         -> DBC decoder -> InfluxDB -> Grafana
+                         -> sampled DBC decoder -> InfluxDB -> Grafana
 ```
 
 The receiver commits raw frames in SQLite with a unique `(car_id, seq)` key
@@ -16,6 +16,13 @@ rows through the cumulative durable ACK. If a connection dies after the server
 commit but before the ACK, the Pi retransmits and the receiver recognizes the duplicate. The laptop's
 InfluxDB exporter retries independently; an Influx outage leaves committed raw
 frames in laptop SQLite with `influx_done=0`.
+
+Server SQLite is the complete raw archive. InfluxDB is intentionally a live
+visualization store: every 100 ms, the exporter processes up to 5,000 raw rows,
+keeps the newest raw frame per `(car, bus, CAN ID)`, and keeps the newest value
+for every decoded signal. It then marks the entire processed raw range handled.
+This preserves multiplexed signal updates and current CAN-table rows without
+forcing InfluxDB and Grafana to ingest every high-rate intermediate frame.
 
 This is a lab prototype, not a production vehicle data logger. The TCP token
 is sent in plaintext. Use an isolated trusted LAN for this test; add TLS or a

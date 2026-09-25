@@ -80,7 +80,7 @@ class RawStore:
     def commit_frame(self, frame):
         return self.commit_batch([frame])
 
-    def pending(self, limit=500):
+    def pending(self, limit=5000):
         rows = self.db.execute("""SELECT car_id,seq,timestamp_ns,bus,can_id,is_extended,
             is_remote,is_fd,is_error,dlc,data FROM raw_frames WHERE influx_done=0
             ORDER BY car_id,seq LIMIT ?""", (limit,)).fetchall()
@@ -91,8 +91,14 @@ class RawStore:
 
     def mark_exported(self, frames):
         with self.db:
-            self.db.executemany("UPDATE raw_frames SET influx_done=1 WHERE car_id=? AND seq=?",
-                                [(f["car_id"], f["seq"]) for f in frames])
+            ranges = {}
+            for frame in frames:
+                bounds = ranges.setdefault(frame["car_id"], [frame["seq"], frame["seq"]])
+                bounds[0] = min(bounds[0], frame["seq"])
+                bounds[1] = max(bounds[1], frame["seq"])
+            self.db.executemany(
+                "UPDATE raw_frames SET influx_done=1 WHERE car_id=? AND seq BETWEEN ? AND ?",
+                [(car_id, bounds[0], bounds[1]) for car_id, bounds in ranges.items()])
 
     def status(self):
         total, pending = self.db.execute(
@@ -189,6 +195,61 @@ def influx_lines(frames, decoder):
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def influx_snapshot_lines(frames, decoder):
+    """Decode all inputs but export only current raw/message and signal values."""
+    latest_frames = {}
+    latest_signals = {}
+    for frame in frames:
+        decoded = decoder.decode(frame)
+        frame_key = (frame["car_id"], frame.get("bus", "unknown"),
+                     frame["can_id"], frame["is_extended"])
+        latest_frames[frame_key] = (frame, decoded)
+        if decoded is None:
+            continue
+        dbc_file, message_name, signals = decoded
+        for name, value in signals.items():
+            latest_signals[(frame["car_id"], frame.get("bus", "unknown"),
+                            frame["can_id"], message_name, name, dbc_file)] = (frame, value)
+
+    lines = []
+    for frame, decoded in latest_frames.values():
+        base = (f"car={_escape_tag(frame['car_id'])},bus={_escape_tag(frame.get('bus', 'unknown'))},"
+                f"can_id=0x{frame['can_id']:X},ext={str(frame['is_extended']).lower()}")
+        data = frame["data"]
+        fields = [f"seq={frame['seq']}i", f"dlc={frame['dlc']}i",
+                  f'data="{data.hex().upper()}"',
+                  f"remote={str(frame['is_remote']).lower()}",
+                  f"fd={str(frame['is_fd']).lower()}",
+                  f"error={str(frame['is_error']).lower()}"]
+        fields.extend(f"b{i}={byte}i" for i, byte in enumerate(data))
+        if decoded is not None:
+            dbc_file, message_name, signals = decoded
+            summary = "; ".join(
+                f"{name}={value.name} ({value.value})"
+                if hasattr(value, "name") and hasattr(value, "value") else f"{name}={value}"
+                for name, value in signals.items())
+            fields.extend((f'message="{_escape_field(message_name)}"',
+                           f'dbc="{_escape_field(dbc_file)}"',
+                           f'decoded="{_escape_field(summary)}"'))
+        lines.append(f"can_frame,{base} {','.join(fields)} {frame['timestamp_ns']}")
+
+    for key, (frame, value) in latest_signals.items():
+        car_id, bus, can_id, message_name, name, dbc_file = key
+        tags = (f"car={_escape_tag(car_id)},bus={_escape_tag(bus)},can_id=0x{can_id:X},"
+                f"message={_escape_tag(message_name)},signal={_escape_tag(name)},"
+                f"dbc={_escape_tag(dbc_file)}")
+        signal_fields = [f"seq={frame['seq']}i"]
+        if hasattr(value, "name") and hasattr(value, "value"):
+            signal_fields.append(f"value={float(value.value)}")
+            signal_fields.append(f'state="{_escape_field(value.name)}"')
+        elif isinstance(value, (int, float)):
+            signal_fields.append(f"value={float(value)}")
+        else:
+            continue
+        lines.append(f"can_signal,{tags} {','.join(signal_fields)} {frame['timestamp_ns']}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def post_influx(url, token, payload):
     headers = {"Content-Type": "text/plain; charset=utf-8"}
     if token:
@@ -199,18 +260,20 @@ def post_influx(url, token, payload):
             raise RuntimeError(f"InfluxDB returned HTTP {response.status}")
 
 
-async def export_forever(store, decoder, url, token, stop=None):
+async def export_forever(store, decoder, url, token, stop=None, *, batch_size=5000,
+                         interval_seconds=0.1):
     stop = stop or asyncio.Event()
     while not stop.is_set():
-        batch = store.pending()
+        try:
+            await asyncio.wait_for(stop.wait(), interval_seconds)
+            continue
+        except asyncio.TimeoutError:
+            pass
+        batch = store.pending(batch_size)
         if not batch:
-            try:
-                await asyncio.wait_for(stop.wait(), 0.25)
-            except asyncio.TimeoutError:
-                pass
             continue
         try:
-            payload = await asyncio.to_thread(influx_lines, batch, decoder)
+            payload = await asyncio.to_thread(influx_snapshot_lines, batch, decoder)
             await asyncio.to_thread(post_influx, url, token, payload)
             store.mark_exported(batch)
         except (OSError, urllib.error.HTTPError, RuntimeError) as exc:

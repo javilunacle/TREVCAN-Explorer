@@ -13,7 +13,8 @@ from unittest.mock import patch
 from .backfill import backfill
 from .car import (CarSpool, capture_forever, load_simulation_frames, read_spool_status,
                   send_forever, spool_writer)
-from .server import DBCDecoder, RawStore, export_forever, influx_lines, post_influx, serve_client
+from .server import (DBCDecoder, RawStore, export_forever, influx_lines,
+                     influx_snapshot_lines, post_influx, serve_client)
 from .simulate import DBC_DIRECTORY, DEFAULT_DBC_FILES, generate_frames
 
 
@@ -254,6 +255,19 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(unknown_lines), 1)
         self.assertNotIn("decoded=", unknown_lines[0])
 
+    def test_snapshot_keeps_latest_raw_frame_and_each_latest_signal(self):
+        dbc_path = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files/master.dbc"
+        decoder = DBCDecoder([str(dbc_path)])
+        frames = [{"car_id": "test-car", "seq": seq, "timestamp_ns": 100 + seq,
+                   "bus": "can0", "can_id": 160, "is_extended": False,
+                   "is_remote": False, "is_fd": False, "is_error": False,
+                   "dlc": 8, "data": (200 + seq).to_bytes(2, "little", signed=True) * 4}
+                  for seq in range(1, 101)]
+        lines = influx_snapshot_lines(frames, decoder).splitlines()
+        self.assertEqual(sum(line.startswith("can_frame,") for line in lines), 1)
+        self.assertEqual(sum(line.startswith("can_signal,") for line in lines), 4)
+        self.assertTrue(all("seq=100i" in line for line in lines))
+
     def test_influx_http_write_shape(self):
         received = []
 
@@ -284,6 +298,39 @@ class StoreTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_export_drains_10000_raw_rows_in_two_posts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RawStore(Path(directory) / "server.sqlite3")
+            dbc_path = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files/master.dbc"
+            decoder = DBCDecoder([str(dbc_path)])
+            for start in range(1, 10001, 1000):
+                frames = [{"type": "frame", "car_id": "backlog-test", "seq": seq,
+                           "timestamp_ns": 1_000_000 + seq, "bus": "can0",
+                           "can_id": 160, "is_extended": False, "is_remote": False,
+                           "is_fd": False, "is_error": False, "dlc": 8,
+                           "data": "FA00000000000000"}
+                          for seq in range(start, start + 1000)]
+                store.commit_batch(frames)
+            stop = asyncio.Event()
+            posts = []
+            with patch("telemetry.server.post_influx",
+                       side_effect=lambda url, token, body: posts.append(body)):
+                task = asyncio.create_task(export_forever(
+                    store, decoder, "http://unused", None, stop,
+                    batch_size=5000, interval_seconds=0.001))
+                try:
+                    async def drained():
+                        while store.status()["pending_influx"]:
+                            await asyncio.sleep(0.01)
+                    await asyncio.wait_for(drained(), 10)
+                    self.assertEqual(len(posts), 2)
+                    self.assertTrue(all(body.count("can_frame,") == 1 for body in posts))
+                    self.assertTrue(all(body.count("can_signal,") == 4 for body in posts))
+                finally:
+                    stop.set()
+                    await asyncio.wait_for(task, 3)
+                    store.close()
+
     async def test_1024_frames_cross_network_in_four_durable_batches(self):
         with tempfile.TemporaryDirectory() as directory:
             spool = CarSpool(Path(directory) / "car.sqlite3", "batch-test")
