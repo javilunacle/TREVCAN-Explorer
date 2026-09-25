@@ -20,54 +20,74 @@ class RawStore:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("""CREATE TABLE IF NOT EXISTS raw_frames (
             car_id TEXT NOT NULL, seq INTEGER NOT NULL,
-            timestamp_ns INTEGER NOT NULL, can_id INTEGER NOT NULL,
+            timestamp_ns INTEGER NOT NULL, bus TEXT NOT NULL DEFAULT 'unknown', can_id INTEGER NOT NULL,
             is_extended INTEGER NOT NULL, is_remote INTEGER NOT NULL,
             is_fd INTEGER NOT NULL, is_error INTEGER NOT NULL,
             dlc INTEGER NOT NULL, data BLOB NOT NULL,
             influx_done INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (car_id, seq))""")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(raw_frames)")}
+        if "bus" not in columns:
+            self.db.execute("ALTER TABLE raw_frames ADD COLUMN bus TEXT NOT NULL DEFAULT 'unknown'")
         self.db.execute("""CREATE TABLE IF NOT EXISTS streams (
             car_id TEXT PRIMARY KEY, last_seq INTEGER NOT NULL)""")
         self.db.execute("CREATE INDEX IF NOT EXISTS raw_pending ON raw_frames(influx_done, car_id, seq)")
         self.db.commit()
 
-    def commit_frame(self, frame):
-        payload = validate_frame(frame)
-        car_id, seq = frame["car_id"], frame["seq"]
+    def commit_batch(self, frames):
+        if not isinstance(frames, list) or not frames or len(frames) > 4096:
+            raise ValueError("invalid frame batch")
+        validated = [(frame, validate_frame(frame)) for frame in frames]
+        car_id = frames[0]["car_id"]
+        if any(frame["car_id"] != car_id for frame in frames):
+            raise ValueError("batch contains multiple car identities")
         try:
             self.db.execute("BEGIN IMMEDIATE")
-            previous = self.db.execute(
-                "SELECT timestamp_ns,can_id,is_extended,is_remote,is_fd,is_error,dlc,data "
-                "FROM raw_frames WHERE car_id=? AND seq=?", (car_id, seq)
-            ).fetchone()
-            values = (frame["timestamp_ns"], frame["can_id"], int(frame["is_extended"]),
-                      int(frame["is_remote"]), int(frame["is_fd"]), int(frame["is_error"]),
-                      frame["dlc"], payload)
-            if previous is not None:
-                if previous != values:
-                    raise ValueError("sequence collision with different frame")
-            else:
-                state = self.db.execute("SELECT last_seq FROM streams WHERE car_id=?", (car_id,)).fetchone()
-                last_seq = state[0] if state else 0
+            state = self.db.execute(
+                "SELECT last_seq FROM streams WHERE car_id=?", (car_id,)).fetchone()
+            last_seq = state[0] if state else 0
+            for frame, payload in validated:
+                seq = frame["seq"]
+                values = (frame["timestamp_ns"], frame.get("bus", "unknown"), frame["can_id"],
+                          int(frame["is_extended"]), int(frame["is_remote"]),
+                          int(frame["is_fd"]), int(frame["is_error"]), frame["dlc"], payload)
+                if seq <= last_seq:
+                    previous = self.db.execute(
+                        "SELECT timestamp_ns,bus,can_id,is_extended,is_remote,is_fd,is_error,dlc,data "
+                        "FROM raw_frames WHERE car_id=? AND seq=?", (car_id, seq)).fetchone()
+                    if (previous is not None and previous[1] == "unknown" and
+                            previous[:1] + previous[2:] == values[:1] + values[2:]):
+                        self.db.execute(
+                            "UPDATE raw_frames SET bus=? WHERE car_id=? AND seq=?",
+                            (values[1], car_id, seq))
+                    elif previous != values:
+                        raise ValueError("sequence collision with different frame")
+                    continue
                 if seq != last_seq + 1:
                     raise ValueError(f"sequence gap: expected {last_seq + 1}, got {seq}")
                 self.db.execute("""INSERT INTO raw_frames
-                    (car_id,seq,timestamp_ns,can_id,is_extended,is_remote,is_fd,is_error,dlc,data)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)""", (car_id, seq, *values))
-                self.db.execute("INSERT OR REPLACE INTO streams(car_id,last_seq) VALUES (?,?)", (car_id, seq))
+                    (car_id,seq,timestamp_ns,bus,can_id,is_extended,is_remote,is_fd,is_error,dlc,data)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (car_id, seq, *values))
+                last_seq = seq
+            self.db.execute("INSERT OR REPLACE INTO streams(car_id,last_seq) VALUES (?,?)",
+                            (car_id, last_seq))
             self.db.commit()  # ACK must be sent only after this durable commit.
-            return seq
+            return frames[-1]["seq"]
         except BaseException:
             self.db.rollback()
             raise
 
+    def commit_frame(self, frame):
+        return self.commit_batch([frame])
+
     def pending(self, limit=500):
-        rows = self.db.execute("""SELECT car_id,seq,timestamp_ns,can_id,is_extended,
+        rows = self.db.execute("""SELECT car_id,seq,timestamp_ns,bus,can_id,is_extended,
             is_remote,is_fd,is_error,dlc,data FROM raw_frames WHERE influx_done=0
             ORDER BY car_id,seq LIMIT ?""", (limit,)).fetchall()
-        return [{"car_id": r[0], "seq": r[1], "timestamp_ns": r[2], "can_id": r[3],
-                 "is_extended": bool(r[4]), "is_remote": bool(r[5]), "is_fd": bool(r[6]),
-                 "is_error": bool(r[7]), "dlc": r[8], "data": r[9]} for r in rows]
+        return [{"car_id": r[0], "seq": r[1], "timestamp_ns": r[2], "bus": r[3],
+                 "can_id": r[4], "is_extended": bool(r[5]), "is_remote": bool(r[6]),
+                 "is_fd": bool(r[7]), "is_error": bool(r[8]), "dlc": r[9],
+                 "data": r[10]} for r in rows]
 
     def mark_exported(self, frames):
         with self.db:
@@ -86,25 +106,34 @@ class RawStore:
 
 class DBCDecoder:
     def __init__(self, paths):
+        self.messages = {}
+        self.failure_count = 0
         if paths:
             import cantools
             self.databases = [(Path(path).name, cantools.database.load_file(path, strict=False))
                               for path in paths]
         else:
             self.databases = []
+        for filename, database in self.databases:
+            for message in database.messages:
+                key = (message.frame_id, bool(message.is_extended_frame))
+                self.messages.setdefault(key, []).append((filename, message))
 
     def decode(self, frame):
         if frame["is_error"] or frame["is_remote"]:
             return None
-        for filename, database in self.databases:
-            for message in database.messages:
-                if (message.frame_id == frame["can_id"] and
-                        bool(message.is_extended_frame) == frame["is_extended"]):
-                    try:
-                        return filename, message.name, message.decode(frame["data"])
-                    except Exception as exc:
-                        print(f"[decode] {filename} seq={frame['seq']}: {exc}", flush=True)
-                        return None
+        failures = []
+        for filename, message in self.messages.get(
+                (frame["can_id"], frame["is_extended"]), []):
+            try:
+                return filename, message.name, message.decode(frame["data"])
+            except Exception as exc:
+                failures.append(f"{filename}: {exc}")
+        if failures:
+            self.failure_count += 1
+            if self.failure_count <= 5 or self.failure_count % 1000 == 0:
+                print(f"[decode] failures={self.failure_count} bus={frame.get('bus', 'unknown')} "
+                      f"seq={frame['seq']}: {'; '.join(failures)}", flush=True)
         return None
 
 
@@ -119,7 +148,8 @@ def _escape_field(value):
 def influx_lines(frames, decoder):
     lines = []
     for frame in frames:
-        base = f"car={_escape_tag(frame['car_id'])},can_id=0x{frame['can_id']:X},ext={str(frame['is_extended']).lower()}"
+        base = (f"car={_escape_tag(frame['car_id'])},bus={_escape_tag(frame.get('bus', 'unknown'))},"
+                f"can_id=0x{frame['can_id']:X},ext={str(frame['is_extended']).lower()}")
         data = frame["data"]
         decoded = decoder.decode(frame)
         fields = [f"seq={frame['seq']}i", f"dlc={frame['dlc']}i",
@@ -143,7 +173,8 @@ def influx_lines(frames, decoder):
             continue
         dbc_file, message_name, signals = decoded
         for name, value in signals.items():
-            tags = (f"car={_escape_tag(frame['car_id'])},can_id=0x{frame['can_id']:X},"
+            tags = (f"car={_escape_tag(frame['car_id'])},bus={_escape_tag(frame.get('bus', 'unknown'))},"
+                    f"can_id=0x{frame['can_id']:X},"
                     f"message={_escape_tag(message_name)},signal={_escape_tag(name)},"
                     f"dbc={_escape_tag(dbc_file)}")
             signal_fields = [f"seq={frame['seq']}i"]
@@ -179,7 +210,7 @@ async def export_forever(store, decoder, url, token, stop=None):
                 pass
             continue
         try:
-            payload = influx_lines(batch, decoder)
+            payload = await asyncio.to_thread(influx_lines, batch, decoder)
             await asyncio.to_thread(post_influx, url, token, payload)
             store.mark_exported(batch)
         except (OSError, urllib.error.HTTPError, RuntimeError) as exc:
@@ -197,10 +228,13 @@ async def serve_client(reader, writer, store, token):
             if not raw:
                 break
             try:
-                frame = json.loads(raw)
-                if token and frame.get("token") != token:
+                message = json.loads(raw)
+                if token and message.get("token") != token:
                     raise ValueError("invalid token")
-                seq = store.commit_frame(frame)
+                if message.get("type") == "batch":
+                    seq = store.commit_batch(message.get("frames"))
+                else:
+                    seq = store.commit_frame(message)
                 writer.write(wire_line({"type": "ack", "seq": seq}))
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                 writer.write(wire_line({"type": "error", "error": str(exc)}))
@@ -219,7 +253,7 @@ async def run(args):
     try:
         server = await asyncio.start_server(
             lambda reader, writer: serve_client(reader, writer, store, args.token),
-            args.host, args.port, limit=4096)
+            args.host, args.port, limit=1024 * 1024)
         print(f"[server] listening on {args.host}:{args.port}", flush=True)
         async with server:
             if args.influx_url:

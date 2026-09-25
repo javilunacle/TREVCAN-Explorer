@@ -11,6 +11,10 @@ def validate_frame(frame):
     car_id = frame.get("car_id")
     if not isinstance(car_id, str) or not car_id or len(car_id) > 128:
         raise ValueError("invalid car_id")
+    bus = frame.get("bus", "unknown")
+    if (not isinstance(bus, str) or not bus or len(bus) > 64 or
+            any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in bus)):
+        raise ValueError("invalid bus")
     for key in ("seq", "timestamp_ns", "can_id", "dlc"):
         if type(frame.get(key)) is not int:
             raise ValueError(f"invalid {key}")

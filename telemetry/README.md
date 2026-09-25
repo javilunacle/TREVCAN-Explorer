@@ -5,15 +5,15 @@ the lossy `StreamForwarder`. Run the car agent on the Pi and the receiver on
 the laptop. The car agent does not load a DBC or contact InfluxDB.
 
 ```text
-Pi:      SocketCAN or simulator -> bounded RAM queue -> SQLite spool -> TCP sender
-Laptop:  TCP receiver -> SQLite raw frame commit -> ACK
+Pi:      SocketCAN bus(es) -> bounded RAM queue -> batched SQLite spool -> TCP batches
+Laptop:  TCP receiver -> batched SQLite raw commit -> cumulative durable ACK
                          -> DBC decoder -> InfluxDB -> Grafana
 ```
 
 The receiver commits raw frames in SQLite with a unique `(car_id, seq)` key
-before acknowledging each frame. The Pi only removes a spool row after its
-matching ACK. If a connection dies after the server commit but before the ACK,
-the Pi retransmits and the receiver recognizes the duplicate. The laptop's
+before acknowledging the committed sequence range. The Pi only removes spool
+rows through the cumulative durable ACK. If a connection dies after the server
+commit but before the ACK, the Pi retransmits and the receiver recognizes the duplicate. The laptop's
 InfluxDB exporter retries independently; an Influx outage leaves committed raw
 frames in laptop SQLite with `influx_done=0`.
 
@@ -22,14 +22,15 @@ is sent in plaintext. Use an isolated trusted LAN for this test; add TLS or a
 VPN, disk-capacity management, hardware throughput tests, and operational
 monitoring before relying on it in a vehicle. A full RAM queue blocks the
 capture loop, which can still lead to CAN kernel-buffer loss. Power failure
-before the spool commit can also lose a frame. Neither is detectable solely
+before the next short spool batch commits can also lose those RAM-queued frames. Neither is detectable solely
 from transport sequence numbers.
 
 ## Prerequisites
 
 - Python 3.11+ on both computers. Run commands from the repository root.
-- `python-can` on the Pi for `--interface can0`; simulation uses only Python's
-  standard library. The laptop needs `cantools` to decode a DBC.
+- `python-can` on the Pi for `--interface can0`; repeat `--interface` to capture
+  more than one SocketCAN bus. Simulation uses only Python's standard library.
+  The laptop needs `cantools` to decode a DBC.
 - Docker Compose on the laptop if using the repository's InfluxDB/Grafana
   containers. The existing `docker-compose.yml` initializes InfluxDB with
   organization `docs` and bucket `home` and exposes InfluxDB on port 8086 and
@@ -115,14 +116,17 @@ After the simulation works, use real CAN frames:
 
 ```bash
 ip -details link show can0
-python -m telemetry.car --interface can0 --host LAPTOP_LAN_IP --port 8765 --db telemetry-car.sqlite3
+python -m telemetry.car --interface can0 --interface can1 --host LAPTOP_LAN_IP --port 8765 --db telemetry-car.sqlite3
 ```
 
 Bring up and configure `can0` using your vehicle's correct CAN bitrate before
 running the second command. The real capture path does not decode on the Pi.
-The server decodes matching frames from the DBC supplied with `--dbc`.
+Both interfaces share one car identity and global sequence, while each frame
+retains its `can0` or `can1` origin in SQLite, TCP, InfluxDB, and Grafana. The
+server decodes matching frames from the DBCs supplied with `--dbc`.
 
-Check the Pi spool from another terminal:
+Check the Pi spool from another terminal. Status opens SQLite read-only and
+does not compete for the single-writer lock:
 
 ```bash
 python -m telemetry.car --status --db telemetry-car.sqlite3
@@ -340,9 +344,10 @@ electrical/tractive-system safety procedure. The telemetry capture process is a
 passive SocketCAN reader, but do not stop unknown vehicle services or change a
 CAN bitrate without identifying their owners and getting approval.
 
-The CANable hardware is the physical USB-to-CAN adapter. SocketCAN is the Linux
-kernel interface exposed by its driver. The sender reads that interface; it
-does not access the adapter directly and it does not transmit frames. Classical
+CANable is one possible physical USB-to-CAN adapter. The tested car currently
+exposes onboard MCP251x SPI controllers instead. In either case, SocketCAN is
+the Linux kernel interface exposed by the driver. The sender reads that
+interface; it does not access the adapter directly and it does not transmit frames. Classical
 CAN normally appears with an MTU of 16 rather than the CAN-FD MTU of 72.
 
 Before changing services, inspect the car Pi:
@@ -435,6 +440,7 @@ export TELEMETRY_TOKEN
 
 ~/trevcan-telemetry-venv/bin/python -m telemetry.car \
   --interface can0 \
+  --interface can1 \
   --host 192.168.0.110 \
   --port 8765 \
   --db ~/telemetry-real-can.sqlite3
@@ -466,7 +472,22 @@ timestamps. Then perform the controlled outage test: disconnect only the
 sender-to-server network path, confirm the car `queued` count rises, reconnect,
 and confirm it drains without sequence gaps.
 
-Do not run synthetic replay and `--interface can0` capture with the same spool
+Upgrade and restart the telemetry receiver before starting an upgraded car
+sender: the batched wire message and cumulative ACK protocol require both ends
+to use the same revision. One process may capture `can0` and `can1`, but never
+start two processes against the same spool file; the car agent rejects the
+second writer instead of allowing sequence corruption.
+
+The defaults commit at most 256 frames or 20 ms of capture in one car SQLite
+transaction, send at most 256 frames per TCP batch, commit the receiver batch in
+one `synchronous=FULL` transaction, and delete the acknowledged range in one
+car transaction. This retains disconnect/restart recovery without forcing
+three durable disk transactions for every frame. `--spool-batch-size`,
+`--spool-flush-ms`, and `--window-size` are available for measured tuning; do
+not claim a zero-loss rate until the real two-bus load and kernel drop counters
+have been tested.
+
+Do not run synthetic replay and real SocketCAN capture with the same spool
 or at the same time. Real SocketCAN capture, sustained vehicle-bus throughput,
 CANable/kernel buffer loss, power-loss behavior, and dashboard correctness are
 hardware tests; synthetic replay does not prove them.

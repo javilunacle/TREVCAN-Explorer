@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -10,12 +11,62 @@ from pathlib import Path
 from unittest.mock import patch
 
 from .backfill import backfill
-from .car import CarSpool, capture_forever, load_simulation_frames, send_forever, spool_writer
+from .car import (CarSpool, capture_forever, load_simulation_frames, read_spool_status,
+                  send_forever, spool_writer)
 from .server import DBCDecoder, RawStore, export_forever, influx_lines, post_influx, serve_client
 from .simulate import DBC_DIRECTORY, DEFAULT_DBC_FILES, generate_frames
 
 
 class StoreTests(unittest.TestCase):
+    def test_existing_car_spool_migrates_without_losing_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-car.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.executemany("INSERT INTO meta VALUES (?,?)", [
+                ("car_id", "legacy-car"), ("next_seq", "2"),
+                ("last_timestamp_ns", "100"), ("last_acked", "0")])
+            db.execute("""CREATE TABLE frames (
+                seq INTEGER PRIMARY KEY, timestamp_ns INTEGER NOT NULL,
+                can_id INTEGER NOT NULL, is_extended INTEGER NOT NULL,
+                is_remote INTEGER NOT NULL, is_fd INTEGER NOT NULL,
+                is_error INTEGER NOT NULL, dlc INTEGER NOT NULL, data BLOB NOT NULL)""")
+            db.execute("INSERT INTO frames VALUES (1,100,256,0,0,0,0,8,?)",
+                       (b"12345678",))
+            db.commit()
+            db.close()
+            spool = CarSpool(path, "legacy-car")
+            try:
+                self.assertEqual(spool.pending()[0]["bus"], "can0")
+                self.assertEqual(spool.status()["queued"], 1)
+            finally:
+                spool.close()
+
+    def test_existing_server_archive_migrates_without_losing_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-server.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("""CREATE TABLE raw_frames (
+                car_id TEXT NOT NULL, seq INTEGER NOT NULL,
+                timestamp_ns INTEGER NOT NULL, can_id INTEGER NOT NULL,
+                is_extended INTEGER NOT NULL, is_remote INTEGER NOT NULL,
+                is_fd INTEGER NOT NULL, is_error INTEGER NOT NULL,
+                dlc INTEGER NOT NULL, data BLOB NOT NULL,
+                influx_done INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (car_id,seq))""")
+            db.execute("CREATE TABLE streams (car_id TEXT PRIMARY KEY,last_seq INTEGER NOT NULL)")
+            db.execute("INSERT INTO raw_frames VALUES ('legacy-car',1,100,256,0,0,0,0,8,?,0)",
+                       (b"12345678",))
+            db.execute("INSERT INTO streams VALUES ('legacy-car',1)")
+            db.commit()
+            db.close()
+            store = RawStore(path)
+            try:
+                self.assertEqual(store.pending()[0]["bus"], "unknown")
+                self.assertEqual(store.status()["raw_frames"], 1)
+            finally:
+                store.close()
+
     def test_full_dashboard_replay_covers_enabled_telemetry_without_control_frames(self):
         paths = [DBC_DIRECTORY / name for name in DEFAULT_DBC_FILES]
         frames = generate_frames(paths)
@@ -105,6 +156,46 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(reopened.append(160, b"12345678"), 3)
             reopened.close()
 
+    def test_spool_batches_bus_identity_and_cumulative_ack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "car.sqlite3"
+            spool = CarSpool(path, "test-car")
+            records = [
+                ("can0", 0x100, b"12345678", False, False, False, False, 8, 100 + index)
+                if index % 2 == 0 else
+                ("can1", 0x101, b"ABCDEFGH", False, False, False, False, 8, 100 + index)
+                for index in range(4)
+            ]
+            self.assertEqual(spool.append_many(records), [1, 2, 3, 4])
+            self.assertEqual([frame["bus"] for frame in spool.pending()],
+                             ["can0", "can1", "can0", "can1"])
+            spool.acknowledge_through(3)
+            self.assertEqual([frame["seq"] for frame in spool.pending()], [4])
+            self.assertEqual(spool.status()["last_acked"], 3)
+            spool.close()
+
+    def test_spool_rejects_a_second_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "car.sqlite3"
+            spool = CarSpool(path, "test-car")
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already in use"):
+                    CarSpool(path, "test-car")
+            finally:
+                spool.close()
+
+    def test_status_is_read_only_while_writer_holds_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "car.sqlite3"
+            spool = CarSpool(path, "test-car")
+            try:
+                spool.append(0x100, b"12345678", bus="can1")
+                status = read_spool_status(path)
+                self.assertEqual(status["queued"], 1)
+                self.assertEqual(status["queued_by_bus"], {"can1": 1})
+            finally:
+                spool.close()
+
     def test_receiver_is_duplicate_safe_and_rejects_gaps(self):
         with tempfile.TemporaryDirectory() as directory:
             store = RawStore(Path(directory) / "server.sqlite3")
@@ -126,6 +217,22 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(reopened.status()["raw_frames"], 1)
             reopened.close()
 
+    def test_receiver_commits_batch_and_preserves_bus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RawStore(Path(directory) / "server.sqlite3")
+            frames = [{"type": "frame", "car_id": "test-car", "seq": seq,
+                       "timestamp_ns": 100 + seq, "bus": f"can{seq % 2}",
+                       "can_id": 0x100 + seq, "is_extended": False,
+                       "is_remote": False, "is_fd": False, "is_error": False,
+                       "dlc": 8, "data": "0000000000000000"}
+                      for seq in range(1, 5)]
+            self.assertEqual(store.commit_batch(frames), 4)
+            self.assertEqual([frame["bus"] for frame in store.pending()],
+                             ["can1", "can0", "can1", "can0"])
+            self.assertEqual(store.commit_batch(frames), 4)
+            self.assertEqual(store.status()["raw_frames"], 4)
+            store.close()
+
     def test_server_side_dbc_decode_and_influx_points(self):
         dbc_path = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files/master.dbc"
         decoder = DBCDecoder([str(dbc_path)])
@@ -135,7 +242,8 @@ class StoreTests(unittest.TestCase):
                  "data": (250).to_bytes(2, "little", signed=True) * 4}
         lines = influx_lines([frame], decoder).splitlines()
         self.assertEqual(len(lines), 5)
-        self.assertTrue(lines[0].startswith("can_frame,car=test-car,can_id=0xA0"))
+        self.assertTrue(lines[0].startswith(
+            "can_frame,car=test-car,bus=unknown,can_id=0xA0"))
         self.assertIn('message="INV_Temps_1"', lines[0])
         self.assertIn('decoded="INV_Module_A_Temp=25.0;', lines[0])
         self.assertTrue(any("signal=INV_Module_A_Temp" in line and "value=25.0" in line
@@ -176,6 +284,37 @@ class StoreTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_1024_frames_cross_network_in_four_durable_batches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = CarSpool(Path(directory) / "car.sqlite3", "batch-test")
+            store = RawStore(Path(directory) / "server.sqlite3")
+            records = [(f"can{index % 2}", 0x100 + index % 8, b"12345678",
+                        False, False, False, False, 8, 1_000_000 + index)
+                       for index in range(1024)]
+            spool.append_many(records)
+            stop = asyncio.Event()
+            server = await asyncio.start_server(
+                lambda r, w: serve_client(r, w, store, None), "127.0.0.1", 0,
+                limit=1024 * 1024)
+            port = server.sockets[0].getsockname()[1]
+            with patch.object(store, "commit_batch", wraps=store.commit_batch) as commits:
+                sender = asyncio.create_task(send_forever(
+                    spool, "127.0.0.1", port, stop=stop, window_size=256))
+                try:
+                    async def delivered():
+                        while spool.status()["queued"] or store.status()["raw_frames"] < 1024:
+                            await asyncio.sleep(0.01)
+                    await asyncio.wait_for(delivered(), 10)
+                    self.assertEqual(commits.call_count, 4)
+                    self.assertEqual(store.status()["streams"]["batch-test"], 1024)
+                finally:
+                    stop.set()
+                    await asyncio.wait_for(sender, 3)
+                    server.close()
+                    await server.wait_closed()
+                    spool.close()
+                    store.close()
+
     async def test_dashboard_samples_cross_spool_tcp_and_export(self):
         paths = [DBC_DIRECTORY / name for name in DEFAULT_DBC_FILES]
         names = {"BMS_Heartbeat_0", "IO_VSense", "Temperatures_1",
@@ -276,7 +415,8 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         queue = asyncio.Queue(maxsize=2)
         task = asyncio.create_task(capture_forever(queue, simulate_rate=20))
         try:
-            can_id, data, extended, remote, fd, error, dlc, timestamp_ns = await asyncio.wait_for(queue.get(), 2)
+            bus, can_id, data, extended, remote, fd, error, dlc, timestamp_ns = await asyncio.wait_for(queue.get(), 2)
+            self.assertEqual(bus, "simulation")
             self.assertEqual((can_id, dlc), (160, 8))
             self.assertEqual((extended, remote, fd, error), (False, False, False, False))
             self.assertGreater(timestamp_ns, 0)
