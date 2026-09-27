@@ -5,10 +5,6 @@
       "enabled": true
     },
     {
-      "filename": "ControlsBus(2).dbc",
-      "enabled": false
-    },
-    {
       "filename": "Baby_MOBO.dbc",
       "enabled": true
     },
@@ -17,15 +13,23 @@
       "enabled": true
     },
     {
-      "filename": "io_messages.dbc",
-      "enabled": false
-    },
-    {
       "filename": "BMS-Inverter-Only.dbc",
       "enabled": true
     },
     {
+      "filename": "VCU.dbc",
+      "enabled": true
+    },
+    {
+      "filename": "can9-database-01.09.dbc",
+      "enabled": true
+    },
+    {
       "filename": "master.dbc",
+      "enabled": false
+    },
+    {
+      "filename": "DAQ-Firmware.dbc",
       "enabled": true
     }
   ]

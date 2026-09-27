@@ -1,9 +1,8 @@
 """Readable, read-only Grafana dashboards for the off-car telemetry stack.
 
 The React application combines monitoring with commands and configuration.
-These dashboards intentionally reproduce only its monitoring views.  They use
-the DBC priority configured by ``telemetry/start_server_pi.sh``: BMS, HVC,
-inverter, master/VCU, then MOBO.
+These dashboards intentionally reproduce only its monitoring views. They use
+the bus-specific DBC routing configured by ``telemetry/start_server_pi.sh``.
 """
 
 DATASOURCE = {"type": "influxdb", "uid": "trevcan-influxdb"}
@@ -208,28 +207,27 @@ def _custom_variable(name, label, values, current):
 
 def overview_dashboard():
     panels = [
-        stat(1, "VCU speed", "VCU_Speed", {"x": 0, "y": 0, "w": 4, "h": 4},
-             dbc="master.dbc", unit="suffix:RPM", decimals=0),
+        stat(1, "VCU speed", "VCU_Speed_MPH", {"x": 0, "y": 0, "w": 4, "h": 4},
+             dbc="VCU.dbc", unit="velocitymph", decimals=1),
         stat(2, "APPS", "VCU_APPS_Value", {"x": 4, "y": 0, "w": 4, "h": 4},
-             dbc="master.dbc", unit="percent", minimum=0, maximum=100, decimals=1),
+             dbc="VCU.dbc", unit="percent", minimum=0, maximum=100, decimals=1),
         stat(3, "Brake pressure", "VCU_BSE_PSI", {"x": 8, "y": 0, "w": 4, "h": 4},
-             dbc="master.dbc", unit="suffix:PSI", minimum=0, decimals=1),
-        stat(4, "HVC state", "BMS_State", {"x": 12, "y": 0, "w": 4, "h": 4},
+             dbc="VCU.dbc", unit="suffix:PSI", minimum=0, decimals=1),
+        stat(4, "HVC state", "HVC_BMS_State", {"x": 12, "y": 0, "w": 4, "h": 4},
              dbc="hvc.dbc", decimals=0),
-        stat(5, "State of charge", "SOC_Percent", {"x": 16, "y": 0, "w": 4, "h": 4},
+        stat(5, "State of charge", "HVC_SOC_Percent", {"x": 16, "y": 0, "w": 4, "h": 4},
              dbc="hvc.dbc", unit="percent", minimum=0, maximum=100, decimals=1),
-        stat(6, "Pack voltage", "Batt_Voltage_mV", {"x": 20, "y": 0, "w": 4, "h": 4},
-             dbc="hvc.dbc", unit="suffix:mV", decimals=0),
+        stat(6, "Pack voltage", "HVC_Batt_Voltage_V", {"x": 20, "y": 0, "w": 4, "h": 4},
+             dbc="hvc.dbc", unit="volt", decimals=1),
         timeseries(
-            7, "Vehicle and motor speed",
-            'r.signal == "VCU_Speed" or r.signal == "INV_Motor_Speed"',
+            7, "Motor speed", 'r.signal == "INV_Motor_Speed"',
             {"x": 0, "y": 4, "w": 12, "h": 8}, unit="suffix:RPM",
-            description="VCU estimated speed and inverter motor speed; identical units only.",
+            description="Inverter motor speed. Vehicle speed is shown separately in mph.",
         ),
         timeseries(
             8, "Accelerator pedal position",
             'r.signal == "VCU_APPS1_Value" or r.signal == "VCU_APPS2_Value" or r.signal == "VCU_APPS_Value"',
-            {"x": 12, "y": 4, "w": 12, "h": 8}, dbc="master.dbc",
+            {"x": 12, "y": 4, "w": 12, "h": 8}, dbc="VCU.dbc",
             unit="percent", minimum=0, maximum=100,
         ),
         timeseries(
@@ -240,19 +238,19 @@ def overview_dashboard():
         ),
         timeseries(
             10, "HVC bus voltage",
-            'r.signal == "Batt_Voltage_mV" or r.signal == "Inv_Voltage_mV"',
+            'r.signal == "HVC_Batt_Voltage_V" or r.signal == "HVC_Inv_Voltage_V"',
             {"x": 8, "y": 12, "w": 8, "h": 8}, dbc="hvc.dbc",
-            unit="suffix:mV",
+            unit="volt",
         ),
         timeseries(
             11, "HVC pack current",
-            'r.signal == "Current_Low_mA" or r.signal == "Current_High_mA"',
+            'r.signal == "HVC_Current_Low_A" or r.signal == "HVC_Current_High_A" or r.signal == "HVC_Pack_Current_A"',
             {"x": 16, "y": 12, "w": 8, "h": 8}, dbc="hvc.dbc",
-            unit="suffix:mA",
+            unit="amp",
         ),
         timeseries(
             12, "Key temperatures",
-            'r.signal == "INV_Motor_Temp" or r.signal == "INV_Coolant_Temp" or r.signal == "INV_Hot_Spot_Temp_Inverter" or r.signal == "Acc_Temp_Min_C" or r.signal == "Acc_Temp_Max_C"',
+            'r.signal == "INV_Motor_Temp" or r.signal == "INV_Coolant_Temp" or r.signal == "INV_Hot_Spot_Temp_Inverter" or r.signal == "HVC_Acc_Temp_Min_C" or r.signal == "HVC_Acc_Temp_Max_C"',
             {"x": 0, "y": 20, "w": 12, "h": 8}, unit="suffix:°C",
         ),
         timeseries(
@@ -315,40 +313,40 @@ def inverter_dashboard():
 def hvc_dashboard():
     dbc = "hvc.dbc"
     panels = [
-        stat(1, "State of charge", "SOC_Percent", {"x": 0, "y": 0, "w": 4, "h": 4},
+        stat(1, "State of charge", "HVC_SOC_Percent", {"x": 0, "y": 0, "w": 4, "h": 4},
              dbc=dbc, unit="percent", minimum=0, maximum=100, decimals=1),
-        stat(2, "Battery voltage", "Batt_Voltage_mV", {"x": 4, "y": 0, "w": 4, "h": 4},
-             dbc=dbc, unit="suffix:mV", decimals=0),
-        stat(3, "Inverter voltage", "Inv_Voltage_mV", {"x": 8, "y": 0, "w": 4, "h": 4},
-             dbc=dbc, unit="suffix:mV", decimals=0),
-        stat(4, "Pack current", "Current_High_mA", {"x": 12, "y": 0, "w": 4, "h": 4},
-             dbc=dbc, unit="suffix:mA", decimals=0),
-        stat(5, "BMS state", "BMS_State", {"x": 16, "y": 0, "w": 4, "h": 4},
+        stat(2, "Battery voltage", "HVC_Batt_Voltage_V", {"x": 4, "y": 0, "w": 4, "h": 4},
+             dbc=dbc, unit="volt", decimals=1),
+        stat(3, "Inverter voltage", "HVC_Inv_Voltage_V", {"x": 8, "y": 0, "w": 4, "h": 4},
+             dbc=dbc, unit="volt", decimals=1),
+        stat(4, "Pack current", "HVC_Pack_Current_A", {"x": 12, "y": 0, "w": 4, "h": 4},
+             dbc=dbc, unit="amp", decimals=1),
+        stat(5, "BMS state", "HVC_BMS_State", {"x": 16, "y": 0, "w": 4, "h": 4},
              dbc=dbc, decimals=0),
-        stat(6, "SDC closed", "SDC_Closed", {"x": 20, "y": 0, "w": 4, "h": 4},
+        stat(6, "SDC open", "HVC_SDC_Open", {"x": 20, "y": 0, "w": 4, "h": 4},
              dbc=dbc, decimals=0),
         timeseries(7, "Battery and inverter voltage",
-                   'r.signal == "Batt_Voltage_mV" or r.signal == "Inv_Voltage_mV"',
-                   {"x": 0, "y": 4, "w": 12, "h": 8}, dbc=dbc, unit="suffix:mV"),
+                   'r.signal == "HVC_Batt_Voltage_V" or r.signal == "HVC_Inv_Voltage_V"',
+                   {"x": 0, "y": 4, "w": 12, "h": 8}, dbc=dbc, unit="volt"),
         timeseries(8, "Current sensor channels",
-                   'r.signal == "Current_Low_mA" or r.signal == "Current_High_mA"',
-                   {"x": 12, "y": 4, "w": 12, "h": 8}, dbc=dbc, unit="suffix:mA"),
+                   'r.signal == "HVC_Current_Low_A" or r.signal == "HVC_Current_High_A" or r.signal == "HVC_Pack_Current_A"',
+                   {"x": 12, "y": 4, "w": 12, "h": 8}, dbc=dbc, unit="amp"),
         timeseries(9, "Accumulator voltage extremes",
-                   'r.signal == "Acc_Volt_Min_mV" or r.signal == "Acc_Volt_Max_mV"',
+                   'r.signal == "HVC_Acc_Volt_Min_mV" or r.signal == "HVC_Acc_Volt_Max_mV"',
                    {"x": 0, "y": 12, "w": 8, "h": 8}, dbc=dbc, unit="suffix:mV"),
         timeseries(10, "Accumulator temperature extremes",
-                   'r.signal == "Acc_Temp_Min_C" or r.signal == "Acc_Temp_Max_C"',
+                   'r.signal == "HVC_Acc_Temp_Min_C" or r.signal == "HVC_Acc_Temp_Max_C"',
                    {"x": 8, "y": 12, "w": 8, "h": 8}, dbc=dbc, unit="suffix:°C"),
-        timeseries(11, "State of charge", 'r.signal == "SOC_Percent"',
+        timeseries(11, "State of charge", 'r.signal == "HVC_SOC_Percent"',
                    {"x": 16, "y": 12, "w": 8, "h": 8}, dbc=dbc,
                    unit="percent", minimum=0, maximum=100),
         timeseries(12, "Current limits",
-                   'r.signal == "Negative_Current_Limit_mA" or r.signal == "Positive_Current_Limit_mA"',
+                   'r.signal == "HVC_Negative_Current_Limit_mA" or r.signal == "HVC_Positive_Current_Limit_mA"',
                    {"x": 0, "y": 20, "w": 12, "h": 8}, dbc=dbc, unit="suffix:mA"),
-        timeseries(13, "E-meter thermistors", 'r.signal =~ /^EMeter_Therm_[0-5]_C$/',
+        timeseries(13, "HVC reference temperature", 'r.signal == "HVC_Ref_Temp_C"',
                    {"x": 12, "y": 20, "w": 12, "h": 8}, dbc=dbc, unit="suffix:°C"),
         latest_table(14, "Safety and fault status",
-                     'r.signal == "IMD_Ok" or r.signal == "BMS_Fault_Ok" or r.signal == "SDC_Closed" or r.signal =~ /^Err_/ or r.signal == "PL_Signal_Reason"',
+                     'r.signal == "HVC_IMD_Fault" or r.signal == "HVC_BMS_Fault" or r.signal == "HVC_SDC_Open" or r.signal =~ /^HVC_Err_/ or r.signal == "HVC_PL_Signal_Reason"',
                      {"x": 0, "y": 28, "w": 24, "h": 8}, dbc=dbc),
     ]
     return _dashboard(
@@ -358,11 +356,11 @@ def hvc_dashboard():
 
 
 def vcu_dashboard():
-    dbc = "master.dbc"
+    dbc = "VCU.dbc"
     panels = [
         stat(1, "VCU state", "VCU_State", {"x": 0, "y": 0, "w": 4, "h": 4}, dbc=dbc, decimals=0),
-        stat(2, "Speed", "VCU_Speed", {"x": 4, "y": 0, "w": 4, "h": 4},
-             dbc=dbc, unit="suffix:RPM", decimals=0),
+        stat(2, "Speed", "VCU_Speed_MPH", {"x": 4, "y": 0, "w": 4, "h": 4},
+             dbc=dbc, unit="velocitymph", decimals=1),
         stat(3, "APPS", "VCU_APPS_Value", {"x": 8, "y": 0, "w": 4, "h": 4},
              dbc=dbc, unit="percent", minimum=0, maximum=100, decimals=1),
         stat(4, "Brake pressure", "VCU_BSE_PSI", {"x": 12, "y": 0, "w": 4, "h": 4},

@@ -14,7 +14,8 @@ from .backfill import backfill
 from .car import (CarSpool, capture_forever, load_simulation_frames, read_spool_status,
                   send_forever, spool_writer)
 from .server import (DBCDecoder, RawStore, export_forever, influx_lines,
-                     influx_snapshot_lines, post_influx, serve_client)
+                     influx_snapshot_lines, parse_bus_dbcs, post_influx,
+                     serve_client)
 from .simulate import DBC_DIRECTORY, DEFAULT_DBC_FILES, generate_frames
 
 
@@ -71,11 +72,13 @@ class StoreTests(unittest.TestCase):
     def test_full_dashboard_replay_covers_enabled_telemetry_without_control_frames(self):
         paths = [DBC_DIRECTORY / name for name in DEFAULT_DBC_FILES]
         frames = generate_frames(paths)
-        self.assertEqual(len(frames), 542)
-        self.assertEqual(len({(f["can_id"], f["is_extended"]) for f in frames}), 271)
+        identities = {(f["can_id"], f["is_extended"]) for f in frames}
+        self.assertGreater(len(identities), 250)
+        self.assertEqual(len(frames), len(identities) * 2)
         names = {frame["message"] for frame in frames}
         for name in ("BMS_Heartbeat_0", "CellVoltage_m0_cellgrp1_to_cellgrp3",
-                     "IO_VSense", "VCU_Summary", "MOBO_Heartbeat", "Temperatures_1"):
+                     "HVC_IO_VSense", "VCU_Summary", "MOBO_Heartbeat", "Temperatures_1",
+                     "DBF_WSPD_FL", "ImuData"):
             self.assertIn(name, names)
         self.assertNotIn("MOBO_Reset_Command", names)
         decoder = DBCDecoder(paths)
@@ -91,8 +94,8 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(decoded[:2], (frame["source_dbc"], frame["message"]))
             exported.extend(influx_lines([raw], decoder).splitlines())
         self.assertEqual(sum(line.startswith("can_frame,") for line in exported), len(frames))
-        for tag in ("signal=CellVoltage_m0_cellgrp1", "signal=Current_Low_mA",
-                    "signal=VCU_Speed", "signal=Battery_Voltage",
+        for tag in ("signal=CellVoltage_m0_cellgrp1", "signal=HVC_Current_Low_A",
+                    "signal=VCU_Speed_MPH", "signal=Battery_Voltage",
                     "signal=INV_Motor_Speed"):
             self.assertTrue(any(tag in line for line in exported), tag)
         with tempfile.TemporaryDirectory() as directory:
@@ -255,6 +258,55 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(unknown_lines), 1)
         self.assertNotIn("decoded=", unknown_lines[0])
 
+    def test_bus_aware_decoder_isolates_overlapping_can_namespaces(self):
+        dbc_dir = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files"
+        decoder = DBCDecoder(bus_paths={
+            "can0": [str(dbc_dir / "VCU.dbc"), str(dbc_dir / "hvc.dbc")],
+            "can1": [str(dbc_dir / "DAQ-Firmware.dbc")],
+        })
+        base = {"car_id": "test-car", "seq": 1, "timestamp_ns": 1,
+                "is_extended": True, "is_remote": False, "is_fd": False,
+                "is_error": False}
+
+        vcu = decoder.decode({**base, "bus": "can0", "can_id": 0xC0,
+                              "is_extended": False, "dlc": 8, "data": bytes(8)})
+        self.assertEqual(vcu[:2], ("VCU.dbc", "VCU_INV_Command"))
+        self.assertIsNone(decoder.decode(
+            {**base, "bus": "can1", "can_id": 0xC0, "is_extended": False,
+             "dlc": 8, "data": bytes(8)}))
+
+        daq = decoder.decode({**base, "bus": "can1", "can_id": 0xDA10000,
+                              "dlc": 8, "data": bytes(8)})
+        self.assertEqual(daq[:2], ("DAQ-Firmware.dbc", "DBF_WSPD_FL"))
+        self.assertIsNone(decoder.decode(
+            {**base, "bus": "can0", "can_id": 0xDA10000,
+             "dlc": 8, "data": bytes(8)}))
+
+        hvc = decoder.decode({**base, "bus": "can0", "can_id": 0x4001F3,
+                              "dlc": 6, "data": bytes(6)})
+        self.assertEqual(hvc[:2], ("hvc.dbc", "HVC_IO_Current"))
+
+    def test_bus_dbc_argument_parser_preserves_priority(self):
+        self.assertEqual(parse_bus_dbcs([
+            "can0=first.dbc", "can1=other.dbc", "can0=second.dbc",
+        ]), {"can0": ["first.dbc", "second.dbc"], "can1": ["other.dbc"]})
+        with self.assertRaisesRegex(ValueError, "expected BUS=PATH"):
+            parse_bus_dbcs(["missing-separator"])
+
+    def test_decode_failure_identifies_bus_id_dlc_and_expected_length(self):
+        dbc_path = (Path(__file__).resolve().parents[1] /
+                    "webserver/backend/dbc_files/hvc.dbc")
+        decoder = DBCDecoder(bus_paths={"can0": [str(dbc_path)]})
+        frame = {"car_id": "test-car", "seq": 42, "timestamp_ns": 1,
+                 "bus": "can0", "can_id": 0x4001F3, "is_extended": True,
+                 "is_remote": False, "is_fd": False, "is_error": False,
+                 "dlc": 5, "data": bytes(5)}
+        with patch("builtins.print") as output:
+            self.assertIsNone(decoder.decode(frame))
+        diagnostic = output.call_args.args[0]
+        self.assertIn("bus=can0 can_id=0x4001F3 dlc=5 seq=42", diagnostic)
+        self.assertIn("HVC_IO_Current[expected_dlc=6]", diagnostic)
+
     def test_snapshot_keeps_latest_raw_frame_and_each_latest_signal(self):
         dbc_path = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files/master.dbc"
         decoder = DBCDecoder([str(dbc_path)])
@@ -364,7 +416,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dashboard_samples_cross_spool_tcp_and_export(self):
         paths = [DBC_DIRECTORY / name for name in DEFAULT_DBC_FILES]
-        names = {"BMS_Heartbeat_0", "IO_VSense", "Temperatures_1",
+        names = {"BMS_Heartbeat_0", "HVC_IO_VSense", "Temperatures_1",
                  "VCU_Summary", "MOBO_Heartbeat"}
         samples = [frame for frame in generate_frames(paths, cycles=1)
                    if frame["message"] in names]

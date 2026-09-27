@@ -46,10 +46,13 @@ exec "$python_bin" -m telemetry.server \
     --port 8765 \
     --db "$data_dir/telemetry-server.sqlite3" \
     --token "$TELEMETRY_TOKEN" \
-    --dbc "$repo_root/webserver/backend/dbc_files/BMS-Firmware-RTOS-Complete.dbc" \
-    --dbc "$repo_root/webserver/backend/dbc_files/hvc.dbc" \
-    --dbc "$repo_root/webserver/backend/dbc_files/BMS-Inverter-Only.dbc" \
-    --dbc "$repo_root/webserver/backend/dbc_files/master.dbc" \
-    --dbc "$repo_root/webserver/backend/dbc_files/Baby_MOBO.dbc" \
+    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/BMS-Firmware-RTOS-Complete.dbc" \
+    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/hvc.dbc" \
+    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/VCU.dbc" \
+    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/BMS-Inverter-Only.dbc" \
+    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/Baby_MOBO.dbc" \
+    --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/DAQ-Firmware.dbc" \
+    --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/VCU.dbc" \
+    --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/can9-database-01.09.dbc" \
     --influx-url "$influx_url" \
     --influx-token "$INFLUXDB_TOKEN"

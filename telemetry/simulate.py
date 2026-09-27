@@ -16,11 +16,22 @@ DBC_DIRECTORY = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_fil
 DEFAULT_DBC_FILES = (
     "BMS-Firmware-RTOS-Complete.dbc",
     "hvc.dbc",
+    "VCU.dbc",
     "BMS-Inverter-Only.dbc",
-    "master.dbc",
     "Baby_MOBO.dbc",
+    "DAQ-Firmware.dbc",
+    "can9-database-01.09.dbc",
 )
-RAW_KEYS = ("can_id", "is_extended", "is_remote", "is_fd", "is_error", "dlc", "data")
+DBC_BUSES = {
+    "BMS-Firmware-RTOS-Complete.dbc": "can0",
+    "hvc.dbc": "can0",
+    "VCU.dbc": "can1",
+    "BMS-Inverter-Only.dbc": "can0",
+    "Baby_MOBO.dbc": "can0",
+    "DAQ-Firmware.dbc": "can1",
+    "can9-database-01.09.dbc": "can1",
+}
+RAW_KEYS = ("bus", "can_id", "is_extended", "is_remote", "is_fd", "is_error", "dlc", "data")
 CONTROL_NAME = re.compile(r"Command|Request|_ACK|Reset|^SET_|Passthrough", re.IGNORECASE)
 
 
@@ -110,7 +121,8 @@ def generate_frames(paths, cycles=2):
             values = {signal.name: _signal_value(signal, cycle, index + offset)
                       for offset, signal in enumerate(message.signals)}
             data = message.encode(values, strict=False)
-            frames.append({"can_id": message.frame_id,
+            frames.append({"bus": DBC_BUSES.get(filename, "simulation"),
+                           "can_id": message.frame_id,
                            "is_extended": bool(message.is_extended_frame),
                            "is_remote": False, "is_fd": len(data) > 8,
                            "is_error": False, "dlc": len(data),

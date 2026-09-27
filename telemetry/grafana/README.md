@@ -60,7 +60,7 @@ data but do not automatically gain the decoded summary. A demo database can be
 backfilled without modifying the raw SQLite archive or car spool. First dry-run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m telemetry.backfill --db telemetry-server.sqlite3 --dbc webserver/backend/dbc_files/master.dbc
+.\.venv\Scripts\python.exe -m telemetry.backfill --db telemetry-server.sqlite3 --dbc-bus can0=webserver/backend/dbc_files/BMS-Firmware-RTOS-Complete.dbc --dbc-bus can0=webserver/backend/dbc_files/hvc.dbc --dbc-bus can0=webserver/backend/dbc_files/VCU.dbc --dbc-bus can0=webserver/backend/dbc_files/BMS-Inverter-Only.dbc --dbc-bus can0=webserver/backend/dbc_files/Baby_MOBO.dbc --dbc-bus can1=webserver/backend/dbc_files/DAQ-Firmware.dbc --dbc-bus can1=webserver/backend/dbc_files/VCU.dbc --dbc-bus can1=webserver/backend/dbc_files/can9-database-01.09.dbc
 ```
 
 If the count is expected, add `--write`. The command reads `INFLUXDB_TOKEN` from

@@ -240,7 +240,8 @@ def load_simulation_frames(path):
                 data = validate_frame(candidate)
             except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
                 raise ValueError(f"invalid replay frame at line {line_number}: {exc}") from exc
-            frames.append((frame["can_id"], data, frame["is_extended"],
+            frames.append((frame.get("bus", "simulation"), frame["can_id"], data,
+                           frame["is_extended"],
                            frame["is_remote"], frame["is_fd"], frame["is_error"],
                            frame["dlc"]))
     if not frames:
@@ -256,7 +257,7 @@ async def capture_forever(queue, *, interface=None, simulate_rate=None,
               "SocketCAN is not used", flush=True)
         index = 0
         while True:
-            await queue.put(("simulation", *frames[index], time.time_ns()))
+            await queue.put((*frames[index], time.time_ns()))
             index = (index + 1) % len(frames)
             await asyncio.sleep(1 / replay_rate)
     elif simulate_rate:

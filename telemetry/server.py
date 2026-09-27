@@ -111,36 +111,80 @@ class RawStore:
 
 
 class DBCDecoder:
-    def __init__(self, paths):
+    def __init__(self, paths=(), bus_paths=None):
+        """Load global DBCs plus optional DBCs restricted to one capture bus.
+
+        A bus with an explicit mapping never falls back to the global map. This
+        prevents an overlapping CAN ID on can0 from being decoded with a can1
+        definition merely because that DBC appeared first on the command line.
+        """
         self.messages = {}
+        self.bus_messages = {}
         self.failure_count = 0
-        if paths:
-            import cantools
-            self.databases = [(Path(path).name, cantools.database.load_file(path, strict=False))
-                              for path in paths]
-        else:
-            self.databases = []
+        self.databases = []
+        if not paths and not bus_paths:
+            return
+        import cantools
+
+        loaded = {}
+
+        def load(path):
+            resolved = str(Path(path).resolve())
+            if resolved not in loaded:
+                loaded[resolved] = (
+                    Path(path).name,
+                    cantools.database.load_file(path, strict=False),
+                )
+            return loaded[resolved]
+
+        self.databases = [load(path) for path in paths]
         for filename, database in self.databases:
             for message in database.messages:
                 key = (message.frame_id, bool(message.is_extended_frame))
                 self.messages.setdefault(key, []).append((filename, message))
 
+        for bus, configured_paths in (bus_paths or {}).items():
+            messages = self.bus_messages.setdefault(bus, {})
+            for filename, database in (load(path) for path in configured_paths):
+                for message in database.messages:
+                    key = (message.frame_id, bool(message.is_extended_frame))
+                    messages.setdefault(key, []).append((filename, message))
+
     def decode(self, frame):
         if frame["is_error"] or frame["is_remote"]:
             return None
         failures = []
-        for filename, message in self.messages.get(
+        bus = frame.get("bus", "unknown")
+        messages = self.bus_messages.get(bus, self.messages)
+        for filename, message in messages.get(
                 (frame["can_id"], frame["is_extended"]), []):
             try:
                 return filename, message.name, message.decode(frame["data"])
             except Exception as exc:
-                failures.append(f"{filename}: {exc}")
+                failures.append(
+                    f"{filename}:{message.name}[expected_dlc={message.length}]: {exc}")
         if failures:
             self.failure_count += 1
             if self.failure_count <= 5 or self.failure_count % 1000 == 0:
-                print(f"[decode] failures={self.failure_count} bus={frame.get('bus', 'unknown')} "
+                print(f"[decode] failures={self.failure_count} bus={bus} "
+                      f"can_id=0x{frame['can_id']:X} dlc={frame['dlc']} "
                       f"seq={frame['seq']}: {'; '.join(failures)}", flush=True)
         return None
+
+
+def parse_bus_dbcs(values):
+    """Convert repeated BUS=PATH arguments into an ordered bus-to-DBC map."""
+    result = {}
+    for value in values:
+        bus, separator, path = value.partition("=")
+        if not separator or not bus or not path:
+            raise ValueError(f"invalid bus DBC mapping {value!r}; expected BUS=PATH")
+        if any(character not in
+               "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+               for character in bus):
+            raise ValueError(f"invalid bus name in DBC mapping: {bus!r}")
+        result.setdefault(bus, []).append(path)
+    return result
 
 
 def _escape_tag(value):
@@ -311,7 +355,7 @@ async def serve_client(reader, writer, store, token):
 
 async def run(args):
     store = RawStore(args.db)
-    decoder = DBCDecoder(args.dbc)
+    decoder = DBCDecoder(args.dbc, parse_bus_dbcs(args.dbc_bus))
     print(f"[server] {store.status()}", flush=True)
     try:
         server = await asyncio.start_server(
@@ -337,10 +381,17 @@ def main():
     parser.add_argument("--token", default=os.getenv("TELEMETRY_TOKEN"),
                         help="shared demo token (or TELEMETRY_TOKEN environment variable)")
     parser.add_argument("--dbc", action="append", default=[], help="DBC path; repeat for priority order")
+    parser.add_argument(
+        "--dbc-bus", action="append", default=[], metavar="BUS=PATH",
+        help="DBC restricted to one capture bus; repeat in decode priority order")
     parser.add_argument("--influx-url", help="full InfluxDB v2 write URL with precision=ns")
     parser.add_argument("--influx-token", default=os.getenv("INFLUXDB_TOKEN"))
     parser.add_argument("--status", action="store_true", help="print raw store counts and exit")
     args = parser.parse_args()
+    try:
+        parse_bus_dbcs(args.dbc_bus)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.host not in ("127.0.0.1", "localhost", "::1") and not args.token and not args.status:
         parser.error("a TELEMETRY_TOKEN is required when listening beyond localhost")
     if args.status:
