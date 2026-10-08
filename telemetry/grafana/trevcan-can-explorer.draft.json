@@ -32,9 +32,9 @@
   "panels": [
     {
       "id": 1,
-      "title": "CAN messages: raw + decoded — latest 500",
+      "title": "CAN messages: raw + decoded - latest 500",
       "type": "table",
-      "description": "One row per frame. Raw CAN ID and bytes stay visible; recognized frames also show the DBC message and decoded signals in the same row.",
+      "description": "One row per frame from the last minute. Use the DBC and CAN bus selectors to reduce table churn; undecoded frames remain visible when All is selected.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -52,9 +52,36 @@
             "type": "influxdb",
             "uid": "${DS_INFLUXDB}"
           },
-          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"can_frame\")\n  |> filter(fn: (r) => r._field == \"seq\" or r._field == \"data\" or r._field == \"dlc\" or r._field == \"message\" or r._field == \"dbc\" or r._field == \"decoded\")\n  |> pivot(rowKey: [\"_time\", \"car\", \"can_id\", \"ext\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"_time\", \"car\", \"seq\", \"can_id\", \"ext\", \"data\", \"dlc\", \"message\", \"decoded\", \"dbc\"])",
+          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> filter(fn: (r) => r._field == \"seq\" or r._field == \"data\" or r._field == \"dlc\" or r._field == \"message\" or r._field == \"dbc\" or r._field == \"decoded\")\n  |> pivot(rowKey: [\"_time\", \"car\", \"bus\", \"can_id\", \"ext\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with dbc: if exists r.dbc then r.dbc else \"Unknown / undecoded\", message: if exists r.message then r.message else \"Unknown\"}))\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
           "rawQuery": true,
           "resultFormat": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "dbc": 0,
+              "message": 1,
+              "_time": 2,
+              "bus": 3,
+              "can_id": 4,
+              "data": 5,
+              "decoded": 6,
+              "dlc": 7,
+              "seq": 8,
+              "ext": 9,
+              "car": 10
+            },
+            "renameByName": {
+              "_time": "time",
+              "bus": "CAN bus",
+              "can_id": "CAN ID",
+              "data": "raw data",
+              "dbc": "DBC file"
+            }
+          }
         }
       ],
       "fieldConfig": {
@@ -147,7 +174,45 @@
     ]
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "dbc_file",
+        "label": "DBC file",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "${DS_INFLUXDB}"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"home\", tag: \"dbc\", predicate: (r) => r._measurement == \"can_signal\", start: -24h)",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"home\", tag: \"dbc\", predicate: (r) => r._measurement == \"can_signal\", start: -24h)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "sort": 1,
+        "options": [],
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "can_bus",
+        "label": "CAN bus",
+        "type": "custom",
+        "query": "can0,can1",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "options": [],
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
   },
   "annotations": {
     "list": []

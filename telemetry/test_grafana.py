@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -88,6 +89,27 @@ class GrafanaDashboardTests(unittest.TestCase):
                     self.assertIn("aggregateWindow(every: v.windowPeriod, fn: last", query)
                 elif panel["type"] in {"stat", "bargauge"}:
                     self.assertIn("|> last()", query)
+
+    def test_can_explorer_bounds_and_filters_the_combined_table(self):
+        path = (Path(__file__).resolve().parent / "grafana" /
+                "trevcan-can-explorer.draft.json")
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        table = dashboard["panels"][0]
+        query = table["targets"][0]["query"]
+        variables = {item["name"]: item for item in dashboard["templating"]["list"]}
+
+        self.assertIn('|> range(start: -1m)', query)
+        self.assertIn('|> limit(n: 500)', query)
+        self.assertIn('"bus", "can_id"', query)
+        self.assertIn('${dbc_file:regex}', query)
+        self.assertIn('${can_bus:regex}', query)
+        self.assertEqual(set(variables), {"dbc_file", "can_bus"})
+        self.assertEqual(variables["dbc_file"]["allValue"], ".*")
+        self.assertEqual(variables["can_bus"]["allValue"], ".*")
+        organize = table["transformations"][0]
+        self.assertEqual(organize["id"], "organize")
+        self.assertEqual(organize["options"]["indexByName"]["dbc"], 0)
+        self.assertEqual(organize["options"]["indexByName"]["message"], 1)
 
 
 if __name__ == "__main__":

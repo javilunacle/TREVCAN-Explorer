@@ -29,9 +29,13 @@ on both Grafana and InfluxDB, particularly when several viewers are connected.
 ## Data model
 
 The CAN Explorer combines raw and decoded fields from the `can_frame`
-measurement. Unknown CAN IDs still appear with blank decoded columns. The
-subsystem dashboards query numeric decoded values from `can_signal`, using its
-`dbc`, `message`, and `signal` tags to avoid mixing unrelated data.
+measurement. Its live table is deliberately limited to the latest minute and
+500 rows so Grafana does not pivot and sort the full dashboard time range on
+every refresh. DBC-file and CAN-bus selectors make the combined table easier
+to inspect; selecting **All** keeps unknown CAN IDs visible as
+`Unknown / undecoded`. The subsystem dashboards query numeric decoded values
+from `can_signal`, using its `dbc`, `message`, and `signal` tags to avoid mixing
+unrelated data.
 
 The receiver uses the first matching frame ID in its configured DBC order. The
 dashboard signal names therefore match the order in
