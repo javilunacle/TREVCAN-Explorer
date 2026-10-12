@@ -28,16 +28,6 @@ fi
     exit 1
 }
 [[ -r "$env_file" ]] || { echo "Missing $env_file" >&2; exit 1; }
-control_token=""
-set +u
-# shellcheck disable=SC1090
-source "$env_file"
-set -u
-control_token="${TELEMETRY_CONTROL_TOKEN:-}"
-[[ ${#control_token} -ge 24 && "$control_token" != replace-* ]] || {
-    echo "Set a non-example TELEMETRY_CONTROL_TOKEN of at least 24 characters." >&2
-    exit 1
-}
 [[ -r "$HOME/.config/trevcan/control_ed25519" ]] || {
     echo "Run bash telemetry/setup_control_pi.sh first." >&2
     exit 1

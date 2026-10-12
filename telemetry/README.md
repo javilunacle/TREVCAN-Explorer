@@ -31,7 +31,9 @@ installed as user services but are **disabled at boot**. Powering the car for
 unrelated work does not start telemetry. Boot automation is deferred until the
 competition configuration is approved.
 
-Use this system only on the team's trusted isolated LAN. The transport token
+Use this system only on the team's trusted isolated LAN. The Operations page
+has no login: anyone connected to that LAN can start or stop telemetry. Its
+restricted car key cannot open a shell or power off the Pi. The transport token
 and web traffic are not encrypted yet.
 
 ## One-time installation
@@ -71,8 +73,6 @@ chmod 600 .env.telemetry
 Set every example value. These credentials have different purposes:
 
 - `TELEMETRY_TOKEN`: shared only by the car sender and telemetry receiver.
-- `TELEMETRY_CONTROL_TOKEN`: separate password for the Operations page; use at
-  least 24 random characters.
 - `INFLUXDB_TOKEN`: existing token with access to organization `docs` and
   bucket `home`. Preserve the working token when reusing the existing Docker
   volume.
@@ -168,17 +168,11 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ```
 
 Approve the telemetry-Pi prompt only if the fingerprints match exactly. The
-setup then asks for the normal car SSH password and car sudo password. It
-installs a dedicated key that cannot open a shell, forward ports, or run
-arbitrary commands. It is restricted to telemetry status/start/stop and the
-exact orderly-poweroff command.
-
-If setup generated a replacement for the example operator token, view it only
-on the telemetry Pi with:
-
-```bash
-grep '^TELEMETRY_CONTROL_TOKEN=' .env.telemetry
-```
+setup then asks for the normal car SSH password. It installs a dedicated key
+that cannot open a shell, forward ports, run arbitrary commands, or power off
+the Pi. It is restricted to telemetry status/start/stop. When upgrading from
+the earlier prototype, it may ask for the car sudo password once to remove the
+obsolete poweroff permission.
 
 Install and start the Operations page for the current boot:
 
@@ -203,23 +197,22 @@ Then the test operator does not need SSH:
 
 1. Power the router, telemetry Pi, and car Pi.
 2. Open `http://192.168.0.136:8080`.
-3. Enter the separate `TELEMETRY_CONTROL_TOKEN`.
-4. Select **Start Test**. This starts the receiver first, waits for TCP port
+3. Select **Start Test**. This starts the receiver first, waits for TCP port
    8765, and then starts the dual-bus car sender.
-5. Open Grafana at `http://192.168.0.136:3000`. All provisioned dashboards
+4. Open Grafana at `http://192.168.0.136:3000`. All provisioned dashboards
    include a **Test controls** link back to the Operations page.
-6. Use **Stop Telemetry - Keep Car On** when capture should stop but the car Pi
-   must remain powered.
-7. Use **End Test & Safely Shut Down Car Pi** when vehicle work is complete.
-   Wait for the shutdown-request confirmation and then wait for the car Pi
-   activity LED to stop before removing vehicle power.
+5. Select **End Test - Stop Telemetry** when capture should stop. This cleanly
+   stops and syncs only the telemetry sender. The car Pi and every other car
+   service remain powered.
+6. Use the team's separate vehicle shutdown procedure if the car itself should
+   be turned off. The Operations page cannot power off the car Pi.
 
 If the car is powered for some other reason, do not select **Start Test**. The
 sender remains inactive.
 
-`Stop` and `End` stop the car sender cleanly. The receiver may remain active on
-the telemetry Pi so it can finish exporting accepted data. To stop the
-test-day services manually afterward:
+`End Test` stops the car sender cleanly. The receiver may remain active on the
+telemetry Pi so it can finish exporting accepted data. To stop the test-day
+services manually afterward:
 
 ```bash
 systemctl --user stop trevcan-telemetry-control.service
@@ -295,12 +288,11 @@ systemctl --user restart trevcan-telemetry-control.service
 journalctl --user -u trevcan-telemetry-control.service -n 100 --no-pager
 ```
 
-### Start Test reports an invalid token
+### Sender reports an invalid token
 
 The car's `~/.config/trevcan/car.env` and telemetry Pi's `.env.telemetry` must
 contain the same `TELEMETRY_TOKEN`. Rerun the car installer to update its copy.
-Do not confuse this transport token with `TELEMETRY_CONTROL_TOKEN` or
-`INFLUXDB_TOKEN`.
+Do not confuse this transport token with `INFLUXDB_TOKEN`.
 
 ### Car queue keeps growing
 

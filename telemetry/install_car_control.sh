@@ -51,8 +51,7 @@ chmod 700 "$HOME/.ssh"
 install -m 0755 "$source_control" "$installed_control"
 
 temporary_keys="$(mktemp)"
-temporary_sudoers="$(mktemp)"
-trap 'rm -f "$temporary_keys" "$temporary_sudoers"' EXIT
+trap 'rm -f "$temporary_keys"' EXIT
 if [[ -f "$authorized_keys" ]]; then
     grep -vF "$marker" "$authorized_keys" > "$temporary_keys" || true
 fi
@@ -60,18 +59,12 @@ printf 'command="%s",no-agent-forwarding,no-port-forwarding,no-pty,no-X11-forwar
     "$installed_control" "$key_type" "$key_body" "$marker" >> "$temporary_keys"
 install -m 0600 "$temporary_keys" "$authorized_keys"
 
-printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff --no-block\n' \
-    "$USER" > "$temporary_sudoers"
-visudo_bin="$(command -v visudo || true)"
-[[ -n "$visudo_bin" ]] || visudo_bin="/usr/sbin/visudo"
-[[ -x "$visudo_bin" ]] || {
-    echo "visudo is required." >&2
-    exit 1
-}
-sudo "$visudo_bin" -cf "$temporary_sudoers"
-sudo install -m 0440 "$temporary_sudoers" "/etc/sudoers.d/trevcan-telemetry-control-$USER"
-sudo loginctl enable-linger "$USER"
+legacy_sudoers="/etc/sudoers.d/trevcan-telemetry-control-$USER"
+if [[ -e "$legacy_sudoers" ]]; then
+    echo "Removing the obsolete telemetry poweroff permission..."
+    sudo rm -f -- "$legacy_sudoers"
+fi
 
 echo "Restricted telemetry-control key installed."
-echo "It can only query/start/stop telemetry or request an orderly shutdown."
+echo "It can only query, start, or stop the telemetry sender."
 echo "The telemetry sender remains disabled at boot."

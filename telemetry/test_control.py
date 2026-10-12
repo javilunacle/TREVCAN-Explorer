@@ -31,8 +31,6 @@ class _Runner:
         if argv[0] == "ssh":
             action = argv[-1]
             state = "running" if action in {"start", "status"} else "idle"
-            if action == "safe-shutdown":
-                state = "shutting-down"
             output = json.dumps({"ok": True, "state": state}) + "\n"
             return subprocess.CompletedProcess(argv, 0, output, "")
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -61,6 +59,8 @@ class TestControllerTests(unittest.TestCase):
         self.assertIn("BatchMode=yes", command)
         with self.assertRaises(ControlError):
             self.controller._remote("anything-else")
+        with self.assertRaises(ControlError):
+            self.controller._remote("safe-shutdown")
 
     def test_start_brings_up_receiver_before_car_sender(self):
         response = self.controller.start_test()
@@ -76,14 +76,12 @@ class TestControllerTests(unittest.TestCase):
         self.assertLess(receiver_start, remote_start)
         self.assertEqual(response["status"]["car"]["state"], "running")
 
-    def test_stop_and_end_have_distinct_actions(self):
-        stopped = self.controller.stop_capture()
+    def test_end_only_stops_telemetry_and_keeps_car_powered(self):
         ended = self.controller.end_test()
         remote_actions = [call[-1] for call in self.runner.calls if call[0] == "ssh"]
         self.assertIn("stop", remote_actions)
-        self.assertIn("safe-shutdown", remote_actions)
-        self.assertIn("remains powered", stopped["message"])
-        self.assertIn("activity LED", ended["message"])
+        self.assertNotIn("safe-shutdown", remote_actions)
+        self.assertIn("remains powered", ended["message"])
 
 
 class _HTTPController:
@@ -102,7 +100,7 @@ class _HTTPController:
 
 class ControlHTTPTests(unittest.TestCase):
     def setUp(self):
-        self.server = ControlHTTPServer(("127.0.0.1", 0), _HTTPController(), "secret")
+        self.server = ControlHTTPServer(("127.0.0.1", 0), _HTTPController())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
@@ -112,29 +110,43 @@ class ControlHTTPTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
-    def test_api_rejects_missing_token(self):
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            urllib.request.urlopen(self.base_url + "/api/status", timeout=2)
-        try:
-            self.assertEqual(caught.exception.code, 401)
-        finally:
-            caught.exception.close()
+    def test_status_is_available_without_a_token(self):
+        with urllib.request.urlopen(self.base_url + "/api/status", timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(payload["car"]["state"], "idle")
 
-    def test_authorized_start(self):
+    def test_start_is_available_on_the_local_network(self):
         request = urllib.request.Request(
             self.base_url + "/api/start",
             data=b"{}",
             method="POST",
-            headers={"Authorization": "Bearer secret", "Content-Type": "application/json"},
+            headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=2) as response:
             payload = json.load(response)
         self.assertEqual(payload["message"], "started")
 
-    def test_index_describes_all_three_operator_actions(self):
+    def test_cross_origin_action_is_rejected(self):
+        request = urllib.request.Request(
+            self.base_url + "/api/start",
+            data=b"{}",
+            method="POST",
+            headers={"Origin": "https://unrelated.example"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=2)
+        try:
+            self.assertEqual(caught.exception.code, 403)
+        finally:
+            caught.exception.close()
+
+    def test_index_describes_start_and_safe_process_stop(self):
         self.assertIn("Start Test", INDEX_HTML)
-        self.assertIn("Stop Telemetry - Keep Car On", INDEX_HTML)
-        self.assertIn("Safely Shut Down Car Pi", INDEX_HTML)
+        self.assertIn("End Test - Stop Telemetry", INDEX_HTML)
+        self.assertIn("car Pi and", INDEX_HTML)
+        self.assertIn("remain powered", INDEX_HTML)
+        self.assertNotIn("Operator token", INDEX_HTML)
+        self.assertNotIn("Safely Shut Down Car Pi", INDEX_HTML)
 
 
 if __name__ == "__main__":

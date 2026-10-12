@@ -34,12 +34,6 @@ case "$action" in
         sync
         state_json
         ;;
-    safe-shutdown)
-        systemctl --user stop "$unit"
-        sync
-        printf '{"ok":true,"state":"shutting-down","service":"inactive"}\n'
-        sudo /usr/bin/systemctl poweroff --no-block
-        ;;
     *)
         printf '{"ok":false,"state":"error","error":"unsupported action"}\n'
         exit 64

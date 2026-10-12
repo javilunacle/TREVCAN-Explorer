@@ -1,4 +1,4 @@
-"""Small authenticated operator UI for supervised telemetry tests.
+"""Small LAN-only operator UI for supervised telemetry tests.
 
 This process runs on the telemetry Pi. It starts the local receiver user unit
 and invokes an allowlisted forced command on the car Pi over SSH. It never
@@ -6,7 +6,6 @@ accepts an arbitrary shell command from HTTP clients.
 """
 
 import argparse
-import hmac
 import json
 import os
 import re
@@ -19,6 +18,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -37,12 +37,10 @@ INDEX_HTML = r"""<!doctype html>
     .status { font-size: 1.4rem; font-weight: 750; margin: 8px 0; }
     .ok { color: #65d46e; } .warn { color: #f4c95d; } .bad { color: #ff6868; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap: 12px; }
-    button, input { border-radius: 8px; border: 1px solid #454b59; padding: 12px;
-                    font: inherit; }
-    input { width: 100%; box-sizing: border-box; background: #0f1218; color: white; }
-    button { cursor: pointer; font-weight: 700; color: white; background: #2867d7; }
+    button { border-radius: 8px; border: 1px solid #454b59; padding: 12px;
+             font: inherit; cursor: pointer; font-weight: 700; color: white;
+             background: #2867d7; }
     button.secondary { background: #4b5563; }
-    button.danger { background: #b4232f; }
     button:disabled { opacity: .45; cursor: wait; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #d1d5db; }
   </style>
@@ -52,48 +50,33 @@ INDEX_HTML = r"""<!doctype html>
   <div class="muted">Car Pi: trevor@192.168.0.145 | Telemetry Pi: 192.168.0.136</div>
 
   <section class="card">
-    <label for="token">Operator token</label>
-    <input id="token" type="password" autocomplete="current-password"
-           placeholder="Enter the separate control token">
-    <p class="muted">Stored only in this browser tab.</p>
-  </section>
-
-  <section class="card">
     <div class="muted">Current state</div>
-    <div id="state" class="status warn">Enter the operator token</div>
+    <div id="state" class="status warn">Checking...</div>
     <pre id="details"></pre>
   </section>
 
   <section class="card grid">
     <button id="start">Start Test</button>
-    <button id="stop" class="secondary">Stop Telemetry - Keep Car On</button>
-    <button id="end" class="danger">End Test &amp; Safely Shut Down Car Pi</button>
+    <button id="end" class="secondary">End Test - Stop Telemetry</button>
   </section>
 
   <section class="card">
-    <strong>End Test procedure</strong>
-    <p class="muted">Wait until this page confirms that shutdown was requested. Then wait for
-      the car Pi activity LED to stop before removing vehicle power.</p>
+    <strong>End Test behavior</strong>
+    <p class="muted">This safely stops and syncs the telemetry sender only. The car Pi and
+      every other vehicle service remain powered. Use the team's separate vehicle shutdown
+      procedure when the car should be turned off.</p>
     <pre id="message"></pre>
   </section>
 </main>
 <script>
-const token = document.getElementById('token');
 const state = document.getElementById('state');
 const details = document.getElementById('details');
 const message = document.getElementById('message');
 const buttons = [...document.querySelectorAll('button')];
-token.value = sessionStorage.getItem('trevcanControlToken') || '';
-token.addEventListener('input', () => {
-  sessionStorage.setItem('trevcanControlToken', token.value);
-  refresh();
-});
-
 async function call(path, method='GET') {
-  if (!token.value) throw new Error('Enter the operator token first.');
   const response = await fetch(path, {
     method,
-    headers: {'Authorization': `Bearer ${token.value}`, 'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json'},
     body: method === 'POST' ? '{}' : undefined,
     cache: 'no-store'
   });
@@ -110,7 +93,6 @@ function show(data) {
 }
 
 async function refresh() {
-  if (!token.value) return;
   try { show(await call('/api/status')); }
   catch (error) { state.textContent = error.message; state.className = 'status bad'; }
 }
@@ -128,10 +110,8 @@ async function act(path, confirmation) {
 }
 
 document.getElementById('start').onclick = () => act('/api/start');
-document.getElementById('stop').onclick = () => act('/api/stop',
-  'Stop telemetry capture but keep the car Pi powered on?');
 document.getElementById('end').onclick = () => act('/api/end',
-  'End this test and shut down the car Pi? Wait for the safe-power indication before removing power.');
+  'End this test and stop telemetry capture? The car Pi will remain powered on.');
 setInterval(refresh, 5000); refresh();
 </script></body></html>"""
 
@@ -152,7 +132,7 @@ class ControlConfig:
 
 
 class TestController:
-    ACTIONS = frozenset({"status", "start", "stop", "safe-shutdown"})
+    ACTIONS = frozenset({"status", "start", "stop"})
 
     def __init__(self, config, *, runner=subprocess.run, connector=socket.create_connection):
         self.config = config
@@ -203,15 +183,13 @@ class TestController:
             "-o", "ConnectTimeout=5",
             target, action,
         ]
-        result = self._run(argv, allow_failure=(action == "safe-shutdown"))
+        result = self._run(argv)
         output = result.stdout.strip().splitlines()
         if output:
             try:
                 return json.loads(output[-1])
             except json.JSONDecodeError as exc:
                 raise ControlError(f"invalid car response: {output[-1]}") from exc
-        if action == "safe-shutdown" and result.returncode == 255:
-            return {"ok": True, "state": "shutting-down"}
         detail = result.stderr.strip() or f"car command exited {result.returncode}"
         raise ControlError(detail)
 
@@ -232,20 +210,11 @@ class TestController:
     def stop_capture(self):
         with self.action_lock:
             self._remote("stop")
-            return {"message": "Telemetry stopped; the car Pi remains powered.",
+            return {"message": "Test ended and telemetry stopped; the car Pi remains powered.",
                     "status": self.status()}
 
     def end_test(self):
-        with self.action_lock:
-            response = self._remote("safe-shutdown")
-            status = {"ok": True, "receiver": self._receiver_state(), "car": response}
-            return {
-                "message": (
-                    "Car-Pi shutdown was requested. Wait for its activity LED to stop before "
-                    "removing vehicle power."
-                ),
-                "status": status,
-            }
+        return self.stop_capture()
 
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -265,10 +234,12 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self):
-        supplied = self.headers.get("Authorization", "")
-        expected = f"Bearer {self.server.control_token}"
-        return hmac.compare_digest(supplied, expected)
+    def _same_origin(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        parsed = urlsplit(origin)
+        return parsed.scheme in {"http", "https"} and parsed.netloc == self.headers.get("Host")
 
     def do_GET(self):
         if self.path == "/":
@@ -277,14 +248,11 @@ class ControlHandler(BaseHTTPRequestHandler):
         if self.path != "/api/status":
             self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
-        if not self._authorized():
-            self._send(HTTPStatus.UNAUTHORIZED, {"error": "invalid operator token"})
-            return
         self._send(HTTPStatus.OK, self.server.controller.status())
 
     def do_POST(self):
-        if not self._authorized():
-            self._send(HTTPStatus.UNAUTHORIZED, {"error": "invalid operator token"})
+        if not self._same_origin():
+            self._send(HTTPStatus.FORBIDDEN, {"error": "cross-origin action rejected"})
             return
         length = int(self.headers.get("Content-Length", "0"))
         if length > 1024:
@@ -312,17 +280,15 @@ class ControlHandler(BaseHTTPRequestHandler):
 class ControlHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, controller, token):
+    def __init__(self, address, controller):
         super().__init__(address, ControlHandler)
         self.controller = controller
-        self.control_token = token
 
 
 def main():
     parser = argparse.ArgumentParser(description="TREVCAN supervised test control page")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--token", default=os.getenv("TELEMETRY_CONTROL_TOKEN"))
     parser.add_argument("--car-host", default=os.getenv("TELEMETRY_CAR_HOST", "192.168.0.145"))
     parser.add_argument("--car-user", default=os.getenv("TELEMETRY_CAR_USER", "trevor"))
     parser.add_argument("--identity", type=Path, default=Path(os.getenv(
@@ -331,12 +297,6 @@ def main():
         "TELEMETRY_CONTROL_KNOWN_HOSTS", "~/.config/trevcan/control_known_hosts")).expanduser())
     args = parser.parse_args()
 
-    if args.host not in ("127.0.0.1", "localhost", "::1") and not args.token:
-        parser.error("TELEMETRY_CONTROL_TOKEN is required when listening beyond localhost")
-    if not args.token:
-        parser.error("an operator token is required")
-    if len(args.token) < 24:
-        parser.error("the operator token must contain at least 24 characters")
     if not re.fullmatch(r"[A-Za-z0-9.-]+", args.car_host):
         parser.error("invalid car host")
     if not re.fullmatch(r"[a-z_][a-z0-9_-]*", args.car_user):
@@ -351,7 +311,7 @@ def main():
     config = ControlConfig(
         car_host=args.car_host, car_user=args.car_user,
         ssh_identity=args.identity, known_hosts=args.known_hosts)
-    server = ControlHTTPServer((args.host, args.port), TestController(config), args.token)
+    server = ControlHTTPServer((args.host, args.port), TestController(config))
     print(f"[control] listening on http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
