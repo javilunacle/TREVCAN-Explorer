@@ -324,6 +324,9 @@ def influx_snapshot_lines(frames, decoder):
             fields.extend((f'message="{_escape_field(message_name)}"',
                            f'dbc="{_escape_field(dbc_file)}"',
                            f'decoded="{_escape_field(summary)}"'))
+        else:
+            fields.extend(('message="Unknown"', 'dbc="Unknown / undecoded"',
+                           'decoded=""'))
         lines.append(f"can_frame,{base} {','.join(fields)} {frame['timestamp_ns']}")
 
     for key, (frame, value) in latest_signals.items():

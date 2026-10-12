@@ -124,6 +124,10 @@ class GrafanaDashboardTests(unittest.TestCase):
         variables = {item["name"]: item for item in dashboard["templating"]["list"]}
 
         self.assertIn('|> range(start: -1m)', query)
+        self.assertIn('|> last()', query)
+        self.assertIn('|> group(columns: ["car", "bus", "can_id", "ext"])', query)
+        self.assertLess(query.index("|> last()"), query.index("|> pivot("))
+        self.assertIn('|> filter(fn: (r) => exists r.seq)', query)
         self.assertIn('|> limit(n: 500)', query)
         self.assertIn('"bus", "can_id"', query)
         self.assertIn('${dbc_file:regex}', query)
@@ -131,6 +135,9 @@ class GrafanaDashboardTests(unittest.TestCase):
         self.assertEqual(set(variables), {"dbc_file", "can_bus"})
         self.assertEqual(variables["dbc_file"]["allValue"], ".*")
         self.assertEqual(variables["can_bus"]["allValue"], ".*")
+        self.assertEqual(dashboard["refresh"], "1s")
+        self.assertEqual(dashboard["time"]["from"], "now-1m")
+        self.assertIn("2s", dashboard["timepicker"]["refresh_intervals"])
         self.assertEqual(dashboard["links"][0]["url"], "http://192.168.0.136:8080")
         organize = table["transformations"][0]
         self.assertEqual(organize["id"], "organize")

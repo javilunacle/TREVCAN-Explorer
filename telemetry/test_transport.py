@@ -347,6 +347,14 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(sum(line.startswith("can_signal,") for line in lines), 4)
         self.assertTrue(all("seq=100i" in line for line in lines))
 
+        unknown = {**frames[-1], "can_id": 0x700, "seq": 101,
+                   "timestamp_ns": 201}
+        unknown_lines = influx_snapshot_lines([unknown], decoder).splitlines()
+        self.assertEqual(len(unknown_lines), 1)
+        self.assertIn('message="Unknown"', unknown_lines[0])
+        self.assertIn('dbc="Unknown / undecoded"', unknown_lines[0])
+        self.assertIn('decoded=""', unknown_lines[0])
+
     def test_influx_http_write_shape(self):
         received = []
 
