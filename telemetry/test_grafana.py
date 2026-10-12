@@ -43,6 +43,14 @@ class GrafanaDashboardTests(unittest.TestCase):
             },
         )
 
+    def test_every_dashboard_links_to_supervised_test_controls(self):
+        for _, dashboard in organized_dashboards():
+            self.assertEqual(len(dashboard["links"]), 1)
+            link = dashboard["links"][0]
+            self.assertEqual(link["title"], "Test controls")
+            self.assertEqual(link["url"], "http://192.168.0.136:8080")
+            self.assertTrue(link["targetBlank"])
+
     def test_every_panel_has_a_flux_target_and_fixed_datasource(self):
         for _, dashboard in organized_dashboards():
             self.assertTrue(dashboard["panels"])
@@ -52,7 +60,11 @@ class GrafanaDashboardTests(unittest.TestCase):
                 for target in panel["targets"]:
                     self.assertEqual(target["datasource"]["uid"], "trevcan-influxdb")
                     self.assertIn('from(bucket: "home")', target["query"])
-                    self.assertIn('r._measurement == "can_signal"', target["query"])
+                    expected_measurement = (
+                        "can_frame" if panel["title"] == "Live CAN telemetry" else "can_signal"
+                    )
+                    self.assertIn(
+                        f'r._measurement == "{expected_measurement}"', target["query"])
 
     def test_explicit_signal_and_message_names_exist_in_repository_dbcs(self):
         missing_signals = set()
@@ -90,6 +102,19 @@ class GrafanaDashboardTests(unittest.TestCase):
                 elif panel["type"] in {"stat", "bargauge"}:
                     self.assertIn("|> last()", query)
 
+    def test_overview_has_read_only_recent_can_status(self):
+        dashboard = dict(organized_dashboards())["trevcan-overview.json"]
+        status = dashboard["panels"][0]
+        self.assertEqual(status["title"], "Live CAN telemetry")
+        self.assertIn("|> range(start: -5s)", status["targets"][0]["query"])
+        self.assertIn('r._measurement == "can_frame"', status["targets"][0]["query"])
+        self.assertIn("array.from", status["targets"][0]["query"])
+        mappings = status["fieldConfig"]["defaults"]["mappings"][0]["options"]
+        self.assertEqual(mappings["0"]["text"], "OFFLINE / NO RECENT CAN")
+        self.assertEqual(mappings["1"]["text"], "LIVE")
+        self.assertEqual(status["fieldConfig"]["defaults"]["noValue"],
+                         "OFFLINE / NO RECENT CAN")
+
     def test_can_explorer_bounds_and_filters_the_combined_table(self):
         path = (Path(__file__).resolve().parent / "grafana" /
                 "trevcan-can-explorer.draft.json")
@@ -106,6 +131,7 @@ class GrafanaDashboardTests(unittest.TestCase):
         self.assertEqual(set(variables), {"dbc_file", "can_bus"})
         self.assertEqual(variables["dbc_file"]["allValue"], ".*")
         self.assertEqual(variables["can_bus"]["allValue"], ".*")
+        self.assertEqual(dashboard["links"][0]["url"], "http://192.168.0.136:8080")
         organize = table["transformations"][0]
         self.assertEqual(organize["id"], "organize")
         self.assertEqual(organize["options"]["indexByName"]["dbc"], 0)

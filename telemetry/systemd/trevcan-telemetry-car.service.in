@@ -1,0 +1,19 @@
+[Unit]
+Description=TREVCAN car raw-CAN telemetry sender
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+UMask=0077
+WorkingDirectory=%h/.local/share/trevcan
+EnvironmentFile=%h/.config/trevcan/car.env
+ExecStartPre=/usr/bin/test -e /sys/class/net/can0
+ExecStartPre=/usr/bin/test -e /sys/class/net/can1
+ExecStart=__PYTHON__ -m telemetry.car --interface can0 --interface can1 --host ${TELEMETRY_SERVER_HOST} --port ${TELEMETRY_SERVER_PORT} --db ${TELEMETRY_CAR_DB}
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

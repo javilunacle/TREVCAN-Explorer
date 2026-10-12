@@ -65,6 +65,9 @@ class StoreTests(unittest.TestCase):
             store = RawStore(path)
             try:
                 self.assertEqual(store.pending()[0]["bus"], "unknown")
+                columns = {row[1] for row in store.db.execute(
+                    "PRAGMA table_info(raw_frames)")}
+                self.assertIn("received_ns", columns)
                 self.assertEqual(store.status()["raw_frames"], 1)
             finally:
                 store.close()
@@ -224,6 +227,7 @@ class StoreTests(unittest.TestCase):
     def test_receiver_commits_batch_and_preserves_bus(self):
         with tempfile.TemporaryDirectory() as directory:
             store = RawStore(Path(directory) / "server.sqlite3")
+            self.assertEqual(store.db.execute("PRAGMA auto_vacuum").fetchone()[0], 2)
             frames = [{"type": "frame", "car_id": "test-car", "seq": seq,
                        "timestamp_ns": 100 + seq, "bus": f"can{seq % 2}",
                        "can_id": 0x100 + seq, "is_extended": False,
@@ -235,6 +239,29 @@ class StoreTests(unittest.TestCase):
                              ["can1", "can0", "can1", "can0"])
             self.assertEqual(store.commit_batch(frames), 4)
             self.assertEqual(store.status()["raw_frames"], 4)
+            store.close()
+
+    def test_receiver_prunes_only_exported_rows_and_keeps_stream_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RawStore(Path(directory) / "server.sqlite3")
+            frames = [{"type": "frame", "car_id": "test-car", "seq": seq,
+                       "timestamp_ns": seq, "bus": "can0", "can_id": 0x100,
+                       "is_extended": False, "is_remote": False, "is_fd": False,
+                       "is_error": False, "dlc": 8, "data": "0000000000000000"}
+                      for seq in (1, 2)]
+            store.commit_batch(frames)
+            store.mark_exported([frames[0]])
+            store.db.execute("UPDATE raw_frames SET received_ns=1")
+            store.db.commit()
+
+            self.assertEqual(store.prune_exported(3600, now_ns=4_000_000_000_000), 1)
+            self.assertEqual(store.status()["raw_frames"], 1)
+            self.assertEqual(store.status()["pending_influx"], 1)
+            self.assertEqual(store.status()["streams"], {"test-car": 2})
+
+            # A lost ancient ACK remains resumable after its payload ages out.
+            self.assertEqual(store.commit_frame(frames[0]), 1)
+            self.assertEqual(store.status()["raw_frames"], 1)
             store.close()
 
     def test_server_side_dbc_decode_and_influx_points(self):

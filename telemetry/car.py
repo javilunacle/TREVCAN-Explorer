@@ -189,9 +189,12 @@ def read_spool_status(path):
 async def send_forever(spool, host, port, token=None, stop=None, window_size=64):
     """Retain rows until a cumulative post-commit ACK covers them."""
     stop = stop or asyncio.Event()
+    retry_delay = 1
+    last_error_print = float("-inf")
     while not stop.is_set():
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), 5)
+            announced_connected = False
             try:
                 while not stop.is_set():
                     batch = spool.pending(window_size)
@@ -215,15 +218,25 @@ async def send_forever(spool, host, port, token=None, stop=None, window_size=64)
                     if reply.get("type") != "ack" or reply.get("seq") != batch[-1]["seq"]:
                         raise ValueError("unexpected cumulative ACK")
                     spool.acknowledge_through(reply["seq"])
+                    if not announced_connected:
+                        print(f"[sender] connected to {host}:{port}", flush=True)
+                        announced_connected = True
+                    retry_delay = 1
+                    last_error_print = float("-inf")
             finally:
                 writer.close()
                 await writer.wait_closed()
-        except (OSError, asyncio.TimeoutError, ConnectionError, json.JSONDecodeError) as exc:
-            print(f"[sender] disconnected: {exc}; retrying", flush=True)
+        except (OSError, asyncio.TimeoutError, ConnectionError,
+                json.JSONDecodeError, ValueError) as exc:
+            now = asyncio.get_running_loop().time()
+            if now - last_error_print >= 30:
+                print(f"[sender] disconnected: {exc}; retrying in {retry_delay}s", flush=True)
+                last_error_print = now
             try:
-                await asyncio.wait_for(stop.wait(), 1)
+                await asyncio.wait_for(stop.wait(), retry_delay)
             except asyncio.TimeoutError:
                 pass
+            retry_delay = min(retry_delay * 2, 10)
 
 
 def load_simulation_frames(path):
@@ -286,7 +299,8 @@ async def capture_forever(queue, *, interface=None, simulate_rate=None,
                                      msg.dlc, time.time_ns()))
 
 
-async def spool_writer(spool, queue, batch_size=256, flush_ms=20):
+async def spool_writer(spool, queue, batch_size=256, flush_ms=20, status_interval=5):
+    last_status = asyncio.get_running_loop().time()
     while True:
         records = [await queue.get()]
         deadline = asyncio.get_running_loop().time() + flush_ms / 1000
@@ -301,8 +315,10 @@ async def spool_writer(spool, queue, batch_size=256, flush_ms=20):
         sequences = spool.append_many(records)
         for _ in records:
             queue.task_done()
-        if sequences[-1] // 100 != (sequences[0] - 1) // 100:
+        now = asyncio.get_running_loop().time()
+        if now - last_status >= status_interval:
             print(f"[spool] {spool.status()}", flush=True)
+            last_status = now
 
 
 async def run(args):
@@ -318,7 +334,7 @@ async def run(args):
                                                   simulate_file=args.simulate_file,
                                                   replay_rate=args.replay_rate))
             group.create_task(spool_writer(spool, queue, args.spool_batch_size,
-                                           args.spool_flush_ms))
+                                           args.spool_flush_ms, args.status_interval))
             group.create_task(send_forever(spool, args.host, args.port, args.token,
                                            window_size=args.window_size))
     finally:
@@ -348,6 +364,8 @@ def main():
                         help="maximum frames in one car SQLite transaction")
     parser.add_argument("--spool-flush-ms", type=float, default=20,
                         help="maximum capture time held before a spool commit")
+    parser.add_argument("--status-interval", type=float, default=5,
+                        help="seconds between spool status log lines (default: 5)")
     args = parser.parse_args()
     if args.status:
         try:
@@ -358,7 +376,7 @@ def main():
     if args.interface is None and args.simulate_rate is None and args.simulate_file is None:
         parser.error("provide --interface, --simulate-rate, or --simulate-file")
     if (args.queue_size < 1 or args.window_size < 1 or args.spool_batch_size < 1 or
-            args.spool_flush_ms <= 0 or
+            args.spool_flush_ms <= 0 or args.status_interval <= 0 or
             args.replay_rate <= 0 or
             (args.simulate_rate is not None and args.simulate_rate <= 0)):
         parser.error("queue, batch, window, flush, and simulation values must be positive")

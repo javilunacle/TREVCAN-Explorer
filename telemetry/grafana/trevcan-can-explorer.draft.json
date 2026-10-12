@@ -220,5 +220,18 @@
   "refresh": "5s",
   "schemaVersion": 39,
   "version": 1,
-  "links": []
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Test controls",
+      "tooltip": "Start or end a supervised vehicle telemetry test",
+      "type": "link",
+      "url": "http://192.168.0.136:8080"
+    }
+  ]
 }

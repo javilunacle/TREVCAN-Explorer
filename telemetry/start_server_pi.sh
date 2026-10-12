@@ -55,4 +55,5 @@ exec "$python_bin" -m telemetry.server \
     --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/VCU.dbc" \
     --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/can9-database-01.09.dbc" \
     --influx-url "$influx_url" \
-    --influx-token "$INFLUXDB_TOKEN"
+    --influx-token "$INFLUXDB_TOKEN" \
+    --raw-retention-hours "${TELEMETRY_RAW_RETENTION_HOURS:-0.25}"

@@ -119,6 +119,65 @@ def stat(panel_id, title, signal, grid, *, dbc=None, unit=None,
     }
 
 
+def live_can_status(panel_id, grid):
+    query = (
+        'import "array"\n\n'
+        'recent = from(bucket: "home")\n'
+        '  |> range(start: -5s)\n'
+        '  |> filter(fn: (r) => r._measurement == "can_frame" and r._field == "seq")\n'
+        '  |> group()\n'
+        '  |> last()\n'
+        '  |> map(fn: (r) => ({_time: now(), _measurement: "telemetry_status", '
+        '_field: "online", _value: 1}))\n\n'
+        'fallback = array.from(rows: [{_time: now(), _measurement: "telemetry_status", '
+        '_field: "online", _value: 0}])\n\n'
+        'union(tables: [fallback, recent])\n'
+        '  |> group()\n'
+        '  |> max(column: "_value")'
+    )
+    return {
+        "id": panel_id,
+        "title": "Live CAN telemetry",
+        "type": "stat",
+        "description": (
+            "LIVE means the telemetry Pi received CAN data within the last five seconds. "
+            "This is a read-only status indicator, not a vehicle control."
+        ),
+        "gridPos": grid,
+        "datasource": DATASOURCE,
+        "targets": [_target(query)],
+        "fieldConfig": {
+            "defaults": {
+                "color": {"mode": "thresholds"},
+                "mappings": [{
+                    "type": "value",
+                    "options": {
+                        "0": {"color": "red", "index": 0,
+                              "text": "OFFLINE / NO RECENT CAN"},
+                        "1": {"color": "green", "index": 1, "text": "LIVE"},
+                    },
+                }],
+                "noValue": "OFFLINE / NO RECENT CAN",
+                "thresholds": {
+                    "mode": "absolute",
+                    "steps": [{"color": "red", "value": None},
+                              {"color": "green", "value": 1}],
+                },
+            },
+            "overrides": [],
+        },
+        "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "horizontal",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+            "textMode": "value",
+            "wideLayout": True,
+        },
+    }
+
+
 def latest_table(panel_id, title, condition, grid, *, dbc=None, description=""):
     return {
         "id": panel_id,
@@ -183,7 +242,20 @@ def _dashboard(uid, title, description, panels, *, variables=None):
         "refresh": "5s",
         "schemaVersion": 39,
         "version": 1,
-        "links": [],
+        "links": [
+            {
+                "asDropdown": False,
+                "icon": "external link",
+                "includeVars": False,
+                "keepTime": False,
+                "tags": [],
+                "targetBlank": True,
+                "title": "Test controls",
+                "tooltip": "Start or end a supervised vehicle telemetry test",
+                "type": "link",
+                "url": "http://192.168.0.136:8080",
+            }
+        ],
     }
 
 
@@ -260,6 +332,9 @@ def overview_dashboard():
             unit="suffix:A",
         ),
     ]
+    for panel in panels:
+        panel["gridPos"]["y"] += 3
+    panels.insert(0, live_can_status(14, {"x": 0, "y": 0, "w": 24, "h": 3}))
     return _dashboard(
         "trevcan-overview", "TREVCAN - Vehicle Overview",
         "Readable high-level vehicle telemetry. Each graph keeps compatible units together.",

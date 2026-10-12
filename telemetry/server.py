@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -14,8 +15,12 @@ from .common import validate_frame, wire_line
 
 class RawStore:
     def __init__(self, path):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_database = not path.exists()
         self.db = sqlite3.connect(path)
+        if new_database:
+            self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("""CREATE TABLE IF NOT EXISTS raw_frames (
@@ -25,13 +30,19 @@ class RawStore:
             is_fd INTEGER NOT NULL, is_error INTEGER NOT NULL,
             dlc INTEGER NOT NULL, data BLOB NOT NULL,
             influx_done INTEGER NOT NULL DEFAULT 0,
+            received_ns INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (car_id, seq))""")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(raw_frames)")}
         if "bus" not in columns:
             self.db.execute("ALTER TABLE raw_frames ADD COLUMN bus TEXT NOT NULL DEFAULT 'unknown'")
+        if "received_ns" not in columns:
+            self.db.execute(
+                "ALTER TABLE raw_frames ADD COLUMN received_ns INTEGER NOT NULL DEFAULT 0")
         self.db.execute("""CREATE TABLE IF NOT EXISTS streams (
             car_id TEXT PRIMARY KEY, last_seq INTEGER NOT NULL)""")
         self.db.execute("CREATE INDEX IF NOT EXISTS raw_pending ON raw_frames(influx_done, car_id, seq)")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS raw_retention ON raw_frames(influx_done, received_ns)")
         self.db.commit()
 
     def commit_batch(self, frames):
@@ -46,6 +57,7 @@ class RawStore:
             state = self.db.execute(
                 "SELECT last_seq FROM streams WHERE car_id=?", (car_id,)).fetchone()
             last_seq = state[0] if state else 0
+            received_ns = time.time_ns()
             for frame, payload in validated:
                 seq = frame["seq"]
                 values = (frame["timestamp_ns"], frame.get("bus", "unknown"), frame["can_id"],
@@ -55,7 +67,12 @@ class RawStore:
                     previous = self.db.execute(
                         "SELECT timestamp_ns,bus,can_id,is_extended,is_remote,is_fd,is_error,dlc,data "
                         "FROM raw_frames WHERE car_id=? AND seq=?", (car_id, seq)).fetchone()
-                    if (previous is not None and previous[1] == "unknown" and
+                    if previous is None:
+                        # Successfully exported rows may already have aged out of the
+                        # bounded raw staging store. The durable stream checkpoint still
+                        # proves that this sequence was committed before it was ACKed.
+                        continue
+                    if (previous[1] == "unknown" and
                             previous[:1] + previous[2:] == values[:1] + values[2:]):
                         self.db.execute(
                             "UPDATE raw_frames SET bus=? WHERE car_id=? AND seq=?",
@@ -66,8 +83,10 @@ class RawStore:
                 if seq != last_seq + 1:
                     raise ValueError(f"sequence gap: expected {last_seq + 1}, got {seq}")
                 self.db.execute("""INSERT INTO raw_frames
-                    (car_id,seq,timestamp_ns,bus,can_id,is_extended,is_remote,is_fd,is_error,dlc,data)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (car_id, seq, *values))
+                    (car_id,seq,timestamp_ns,bus,can_id,is_extended,is_remote,is_fd,is_error,
+                     dlc,data,received_ns)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (car_id, seq, *values, received_ns))
                 last_seq = seq
             self.db.execute("INSERT OR REPLACE INTO streams(car_id,last_seq) VALUES (?,?)",
                             (car_id, last_seq))
@@ -99,6 +118,36 @@ class RawStore:
             self.db.executemany(
                 "UPDATE raw_frames SET influx_done=1 WHERE car_id=? AND seq BETWEEN ? AND ?",
                 [(car_id, bounds[0], bounds[1]) for car_id, bounds in ranges.items()])
+
+    def prune_exported(self, retention_seconds, *, limit=100000, now_ns=None):
+        """Delete only successfully exported raw rows older than the staging window.
+
+        ``streams`` is deliberately retained so reconnecting cars continue their
+        cumulative sequence after the raw payload has aged out. Unexported rows are
+        never removed by retention.
+        """
+        if retention_seconds <= 0 or limit <= 0:
+            return 0
+        cutoff_ns = (time.time_ns() if now_ns is None else now_ns) - int(
+            retention_seconds * 1_000_000_000)
+        with self.db:
+            cursor = self.db.execute("""DELETE FROM raw_frames WHERE rowid IN (
+                SELECT rowid FROM raw_frames
+                WHERE influx_done=1 AND
+                      (CASE WHEN received_ns > 0 THEN received_ns ELSE timestamp_ns END) < ?
+                ORDER BY CASE WHEN received_ns > 0 THEN received_ns ELSE timestamp_ns END
+                LIMIT ?)
+                """, (cutoff_ns, limit))
+        if self.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 2:
+            self.db.execute("PRAGMA incremental_vacuum(1000)")
+        return cursor.rowcount
+
+    def quick_status(self):
+        """Return indexed startup state without scanning every retained raw row."""
+        pending = self.db.execute(
+            "SELECT COUNT(*) FROM raw_frames WHERE influx_done=0").fetchone()[0]
+        streams = dict(self.db.execute("SELECT car_id,last_seq FROM streams").fetchall())
+        return {"pending_influx": pending, "streams": streams}
 
     def status(self):
         total, pending = self.db.execute(
@@ -328,6 +377,25 @@ async def export_forever(store, decoder, url, token, stop=None, *, batch_size=50
                 pass
 
 
+async def prune_forever(store, retention_seconds, stop=None, *, interval_seconds=10,
+                        batch_size=100000):
+    """Bound the exported raw staging rows without touching retryable data."""
+    stop = stop or asyncio.Event()
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), interval_seconds)
+            continue
+        except asyncio.TimeoutError:
+            pass
+        try:
+            deleted = store.prune_exported(retention_seconds, limit=batch_size)
+            if deleted:
+                print(f"[retention] removed {deleted} exported raw frames", flush=True)
+        except sqlite3.Error as exc:
+            # Cleanup must never take down the durable receiver.
+            print(f"[retention] cleanup failed: {exc}; retrying", flush=True)
+
+
 async def serve_client(reader, writer, store, token):
     try:
         while True:
@@ -356,7 +424,7 @@ async def serve_client(reader, writer, store, token):
 async def run(args):
     store = RawStore(args.db)
     decoder = DBCDecoder(args.dbc, parse_bus_dbcs(args.dbc_bus))
-    print(f"[server] {store.status()}", flush=True)
+    print(f"[server] {store.quick_status()}", flush=True)
     try:
         server = await asyncio.start_server(
             lambda reader, writer: serve_client(reader, writer, store, args.token),
@@ -367,6 +435,9 @@ async def run(args):
                 async with asyncio.TaskGroup() as group:
                     group.create_task(server.serve_forever())
                     group.create_task(export_forever(store, decoder, args.influx_url, args.influx_token))
+                    if args.raw_retention_hours > 0:
+                        group.create_task(prune_forever(
+                            store, args.raw_retention_hours * 60 * 60))
             else:
                 await server.serve_forever()
     finally:
@@ -386,8 +457,14 @@ def main():
         help="DBC restricted to one capture bus; repeat in decode priority order")
     parser.add_argument("--influx-url", help="full InfluxDB v2 write URL with precision=ns")
     parser.add_argument("--influx-token", default=os.getenv("INFLUXDB_TOKEN"))
+    parser.add_argument(
+        "--raw-retention-hours", type=float,
+        default=float(os.getenv("TELEMETRY_RAW_RETENTION_HOURS", "0")),
+        help="hours to retain successfully exported raw SQLite rows; 0 disables pruning")
     parser.add_argument("--status", action="store_true", help="print raw store counts and exit")
     args = parser.parse_args()
+    if args.raw_retention_hours < 0:
+        parser.error("--raw-retention-hours must be zero or positive")
     try:
         parse_bus_dbcs(args.dbc_bus)
     except ValueError as exc:

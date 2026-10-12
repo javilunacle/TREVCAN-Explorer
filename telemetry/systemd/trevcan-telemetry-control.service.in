@@ -1,0 +1,16 @@
+[Unit]
+Description=TREVCAN supervised telemetry test controls
+After=network-online.target
+
+[Service]
+Type=simple
+UMask=0077
+WorkingDirectory=__REPO_ROOT__
+Environment=HOME=__HOME__
+EnvironmentFile=__REPO_ROOT__/.env.telemetry
+ExecStart=__REPO_ROOT__/.venv/bin/python -m telemetry.control --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
