@@ -202,19 +202,32 @@ class DBCDecoder:
     def decode(self, frame):
         if frame["is_error"] or frame["is_remote"]:
             return None
+        next_failure_count = self.failure_count + 1
+        should_log_failure = next_failure_count <= 5 or next_failure_count % 1000 == 0
+        had_failure = False
         failures = []
         bus = frame.get("bus", "unknown")
         messages = self.bus_messages.get(bus, self.messages)
         for filename, message in messages.get(
                 (frame["can_id"], frame["is_extended"]), []):
+            if len(frame["data"]) != message.length:
+                had_failure = True
+                if should_log_failure:
+                    failures.append(
+                        f"{filename}:{message.name}[expected_dlc={message.length}]: "
+                        f"Wrong data size: {len(frame['data'])} instead of "
+                        f"{message.length} bytes")
+                continue
             try:
                 return filename, message.name, message.decode(frame["data"])
             except Exception as exc:
-                failures.append(
-                    f"{filename}:{message.name}[expected_dlc={message.length}]: {exc}")
-        if failures:
-            self.failure_count += 1
-            if self.failure_count <= 5 or self.failure_count % 1000 == 0:
+                had_failure = True
+                if should_log_failure:
+                    failures.append(
+                        f"{filename}:{message.name}[expected_dlc={message.length}]: {exc}")
+        if had_failure:
+            self.failure_count = next_failure_count
+            if should_log_failure:
                 print(f"[decode] failures={self.failure_count} bus={bus} "
                       f"can_id=0x{frame['can_id']:X} dlc={frame['dlc']} "
                       f"seq={frame['seq']}: {'; '.join(failures)}", flush=True)

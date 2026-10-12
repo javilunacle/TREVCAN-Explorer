@@ -38,11 +38,13 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False, aggregate=F
         query += '\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)'
     if table:
         query += (
-            '\n  |> group()'
             '\n  |> keep(columns: ["_time", "message", "signal", "_value"])'
+            '\n  |> group()'
             '\n  |> rename(columns: {_time: "time", _value: "value"})'
             '\n  |> sort(columns: ["signal"])'
         )
+    else:
+        query += '\n  |> keep(columns: ["_time", "_value", "signal"])'
     return query
 
 

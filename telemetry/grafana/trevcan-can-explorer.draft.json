@@ -115,7 +115,7 @@
             "type": "influxdb",
             "uid": "${DS_INFLUXDB}"
           },
-          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\" and r._field == \"seq\")\n  |> group()\n  |> aggregateWindow(every: 1s, fn: count, createEmpty: false)",
+          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\" and r._field == \"seq\")\n  |> group()\n  |> aggregateWindow(every: 1s, fn: count, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\"])",
           "rawQuery": true,
           "resultFormat": "time_series"
         }
@@ -148,7 +148,7 @@
             "type": "influxdb",
             "uid": "${DS_INFLUXDB}"
           },
-          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_signal\" and r._field == \"value\")\n  |> filter(fn: (r) => r.signal =~ /^INV_.*(Temp|Temperature)/)\n  |> aggregateWindow(every: 1s, fn: last, createEmpty: false)",
+          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_signal\" and r._field == \"value\")\n  |> filter(fn: (r) => r.signal =~ /^INV_.*(Temp|Temperature)/)\n  |> group(columns: [\"signal\"])\n  |> aggregateWindow(every: 1s, fn: last, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"signal\"])",
           "rawQuery": true,
           "resultFormat": "time_series"
         }

@@ -114,6 +114,8 @@ class GrafanaDashboardTests(unittest.TestCase):
                     self.assertIn("aggregateWindow(every: v.windowPeriod, fn: last", query)
                 elif panel["type"] in {"stat", "bargauge"}:
                     self.assertIn("|> last()", query)
+                if panel["title"] != "Live CAN telemetry":
+                    self.assertIn("|> keep(columns:", query)
 
     def test_overview_has_read_only_recent_can_status(self):
         dashboard = dict(organized_dashboards())["trevcan-overview.json"]
