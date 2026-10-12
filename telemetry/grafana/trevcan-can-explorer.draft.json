@@ -34,7 +34,7 @@
       "id": 1,
       "title": "CAN messages: latest value per CAN ID",
       "type": "table",
-      "description": "One current row per car, CAN bus, and CAN ID from the last minute. The latest values are selected before pivoting so one-second refreshes do not rescan and reshape every historical frame.",
+      "description": "One current row per car, CAN bus, and CAN ID. A table-ready receiver snapshot avoids the expensive multi-field Flux pivot and keeps one-second refreshes lightweight.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -52,7 +52,7 @@
             "type": "influxdb",
             "uid": "${DS_INFLUXDB}"
           },
-          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> filter(fn: (r) => r._field == \"seq\" or r._field == \"data\" or r._field == \"dlc\" or r._field == \"message\" or r._field == \"dbc\" or r._field == \"decoded\")\n  |> last()\n  |> map(fn: (r) => ({r with _value: string(v: r._value)}))\n  |> group(columns: [\"car\", \"bus\", \"can_id\", \"ext\"])\n  |> pivot(rowKey: [\"_time\", \"car\", \"bus\", \"can_id\", \"ext\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.seq)\n  |> map(fn: (r) => ({r with dbc: if exists r.dbc then r.dbc else \"Unknown / undecoded\", message: if exists r.message then r.message else \"Unknown\"}))\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
+          "query": "import \"strings\"\n\nfrom(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\" and r._field == \"table_row\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> last()\n  |> map(fn: (r) => {\n    cells = strings.split(v: r._value, t: \"␟\")\n    return {r with seq: cells[0], dlc: cells[1], data: cells[2], dbc: cells[3], message: cells[4], decoded: cells[5]}\n  })\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
           "rawQuery": true,
           "resultFormat": "table"
         }

@@ -137,12 +137,12 @@ class GrafanaDashboardTests(unittest.TestCase):
         variables = {item["name"]: item for item in dashboard["templating"]["list"]}
 
         self.assertIn('|> range(start: -1m)', query)
+        self.assertIn('r._field == "table_row"', query)
         self.assertIn('|> last()', query)
-        self.assertIn('|> map(fn: (r) => ({r with _value: string(v: r._value)}))', query)
-        self.assertIn('|> group(columns: ["car", "bus", "can_id", "ext"])', query)
-        self.assertLess(query.index("|> last()"), query.index("|> pivot("))
-        self.assertLess(query.index("string(v: r._value)"), query.index("|> pivot("))
-        self.assertIn('|> filter(fn: (r) => exists r.seq)', query)
+        self.assertIn('strings.split(v: r._value, t: "␟")', query)
+        self.assertNotIn("|> pivot(", query)
+        self.assertNotIn('r._field == "seq" or', query)
+        self.assertLess(query.index("|> last()"), query.index("strings.split("))
         self.assertIn('|> limit(n: 500)', query)
         self.assertIn('"bus", "can_id"', query)
         self.assertIn('${dbc_file:regex}', query)

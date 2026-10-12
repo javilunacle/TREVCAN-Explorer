@@ -346,6 +346,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(sum(line.startswith("can_frame,") for line in lines), 1)
         self.assertEqual(sum(line.startswith("can_signal,") for line in lines), 4)
         self.assertTrue(all("seq=100i" in line for line in lines))
+        frame_line = next(line for line in lines if line.startswith("can_frame,"))
+        self.assertIn('table_row="100␟8␟', frame_line)
+        self.assertIn('␟master.dbc␟INV_Temps_1␟', frame_line)
 
         unknown = {**frames[-1], "can_id": 0x700, "seq": 101,
                    "timestamp_ns": 201}
@@ -354,6 +357,8 @@ class StoreTests(unittest.TestCase):
         self.assertIn('message="Unknown"', unknown_lines[0])
         self.assertIn('dbc="Unknown / undecoded"', unknown_lines[0])
         self.assertIn('decoded=""', unknown_lines[0])
+        self.assertIn('table_row="101␟8␟', unknown_lines[0])
+        self.assertIn('␟Unknown / undecoded␟Unknown␟"', unknown_lines[0])
 
     def test_influx_http_write_shape(self):
         received = []

@@ -244,6 +244,17 @@ def _escape_field(value):
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
+_TABLE_ROW_SEPARATOR = "\u241f"
+
+
+def _table_row_value(*values):
+    """Pack display-only columns without creating six Flux field streams."""
+    return _TABLE_ROW_SEPARATOR.join(
+        str(value).replace(_TABLE_ROW_SEPARATOR, " ").replace("\r", " ").replace("\n", " ")
+        for value in values
+    )
+
+
 def influx_lines(frames, decoder):
     lines = []
     for frame in frames:
@@ -325,8 +336,16 @@ def influx_snapshot_lines(frames, decoder):
                            f'dbc="{_escape_field(dbc_file)}"',
                            f'decoded="{_escape_field(summary)}"'))
         else:
-            fields.extend(('message="Unknown"', 'dbc="Unknown / undecoded"',
+            message_name = "Unknown"
+            dbc_file = "Unknown / undecoded"
+            summary = ""
+            fields.extend((f'message="{message_name}"', f'dbc="{dbc_file}"',
                            'decoded=""'))
+        table_row = _table_row_value(
+            frame["seq"], frame["dlc"], data.hex().upper(), dbc_file,
+            message_name, summary,
+        )
+        fields.append(f'table_row="{_escape_field(table_row)}"')
         lines.append(f"can_frame,{base} {','.join(fields)} {frame['timestamp_ns']}")
 
     for key, (frame, value) in latest_signals.items():
