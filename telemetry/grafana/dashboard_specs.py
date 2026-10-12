@@ -265,7 +265,7 @@ def _dashboard(uid, title, description, panels, *, variables=None):
                 "keepTime": False,
                 "tags": [],
                 "targetBlank": True,
-                "title": "Test controls",
+                "title": "Telemetry tools",
                 "tooltip": "Start or end a supervised vehicle telemetry test",
                 "type": "link",
                 "url": "http://192.168.0.136:8080",

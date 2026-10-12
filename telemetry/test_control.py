@@ -141,6 +141,7 @@ class ControlHTTPTests(unittest.TestCase):
             caught.exception.close()
 
     def test_index_describes_start_and_safe_process_stop(self):
+        self.assertIn("TREVCAN Telemetry Tools", INDEX_HTML)
         self.assertIn("Start Test", INDEX_HTML)
         self.assertIn("End Test - Stop Telemetry", INDEX_HTML)
         self.assertIn("car Pi and", INDEX_HTML)

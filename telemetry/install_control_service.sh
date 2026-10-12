@@ -49,9 +49,9 @@ systemctl --user disable trevcan-telemetry-control.service >/dev/null 2>&1 || tr
 
 if [[ "$start_now" == true ]]; then
     systemctl --user restart trevcan-telemetry-control.service
-    echo "Operations page started for this boot."
+    echo "TREVCAN Telemetry Tools started for this boot."
 else
-    echo "Operations page installed but not started and disabled at boot."
+    echo "TREVCAN Telemetry Tools installed but not started and disabled at boot."
 fi
 echo "Start:  systemctl --user start trevcan-telemetry-control.service"
 echo "Stop:   systemctl --user stop trevcan-telemetry-control.service"

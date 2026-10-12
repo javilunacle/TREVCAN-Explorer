@@ -1,5 +1,5 @@
 [Unit]
-Description=TREVCAN supervised telemetry test controls
+Description=TREVCAN Telemetry Tools
 After=network-online.target
 
 [Service]

@@ -26,12 +26,12 @@ committed and acknowledged it. A network or receiver outage therefore grows
 the car queue; reconnecting drains it. Decode failures do not prevent raw
 storage or ACKs.
 
-This phase is supervised. The car sender, receiver, and Operations page are
-installed as user services but are **disabled at boot**. Powering the car for
-unrelated work does not start telemetry. Boot automation is deferred until the
-competition configuration is approved.
+This phase is supervised. The car sender, receiver, and TREVCAN Telemetry
+Tools page are installed as user services but are **disabled at boot**.
+Powering the car for unrelated work does not start telemetry. Boot automation
+is deferred until the competition configuration is approved.
 
-Use this system only on the team's trusted isolated LAN. The Operations page
+Use this system only on the team's trusted isolated LAN. TREVCAN Telemetry Tools
 has no login: anyone connected to that LAN can start or stop telemetry. Its
 restricted car key cannot open a shell or power off the Pi. The transport token
 and web traffic are not encrypted yet.
@@ -174,7 +174,7 @@ the Pi. It is restricted to telemetry status/start/stop. When upgrading from
 the earlier prototype, it may ask for the car sudo password once to remove the
 obsolete poweroff permission.
 
-Install and start the Operations page for the current boot:
+Install and start TREVCAN Telemetry Tools for the current boot:
 
 ```bash
 bash telemetry/install_control_service.sh --start-now
@@ -200,12 +200,12 @@ Then the test operator does not need SSH:
 3. Select **Start Test**. This starts the receiver first, waits for TCP port
    8765, and then starts the dual-bus car sender.
 4. Open Grafana at `http://192.168.0.136:3000`. All provisioned dashboards
-   include a **Test controls** link back to the Operations page.
+   include a **Telemetry tools** link back to TREVCAN Telemetry Tools.
 5. Select **End Test - Stop Telemetry** when capture should stop. This cleanly
    stops and syncs only the telemetry sender. The car Pi and every other car
    service remain powered.
 6. Use the team's separate vehicle shutdown procedure if the car itself should
-   be turned off. The Operations page cannot power off the car Pi.
+   be turned off. TREVCAN Telemetry Tools cannot power off the car Pi.
 
 If the car is powered for some other reason, do not select **Start Test**. The
 sender remains inactive.
@@ -279,7 +279,7 @@ Do not delete an active SQLite file or its `-wal`, `-shm`, or `.lock` files.
 
 ## Current troubleshooting
 
-### Operations page is unavailable
+### TREVCAN Telemetry Tools is unavailable
 
 On the telemetry Pi:
 

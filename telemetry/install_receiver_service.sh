@@ -63,7 +63,7 @@ if [[ "$enable_at_boot" == true ]]; then
     fi
 else
     systemctl --user disable trevcan-telemetry-receiver.service >/dev/null 2>&1 || true
-    echo "Boot startup is disabled. The Operations page starts this service for a test."
+    echo "Boot startup is disabled. TREVCAN Telemetry Tools starts this service for a test."
     if systemctl --user is-active --quiet trevcan-telemetry-receiver.service; then
         echo "The service was already running and was not interrupted by this installer."
     fi

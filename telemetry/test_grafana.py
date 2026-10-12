@@ -47,7 +47,7 @@ class GrafanaDashboardTests(unittest.TestCase):
         for _, dashboard in organized_dashboards():
             self.assertEqual(len(dashboard["links"]), 1)
             link = dashboard["links"][0]
-            self.assertEqual(link["title"], "Test controls")
+            self.assertEqual(link["title"], "Telemetry tools")
             self.assertEqual(link["url"], "http://192.168.0.136:8080")
             self.assertTrue(link["targetBlank"])
 
