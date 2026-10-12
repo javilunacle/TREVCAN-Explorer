@@ -29,6 +29,8 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USERNAME:?set GRAFANA_ADMIN_USERNAME}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
       GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+      GF_TIME_PICKER_QUICK_RANGES: >-
+        [{"from":"now-5m","to":"now","display":"Last 5 minutes"},{"from":"now-15m","to":"now","display":"Last 15 minutes"},{"from":"now-30m","to":"now","display":"Last 30 minutes"},{"from":"now-1h","to":"now","display":"Last 1 hour"},{"from":"now-6h","to":"now","display":"Last 6 hours"},{"from":"now-12h","to":"now","display":"Last 12 hours"},{"from":"now-24h","to":"now","display":"Last 24 hours"}]
       INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:?set INFLUXDB_TOKEN}
     volumes:
       - grafana-data:/var/lib/grafana

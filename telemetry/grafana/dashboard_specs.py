@@ -6,6 +6,16 @@ the bus-specific DBC routing configured by ``telemetry/start_server_pi.sh``.
 """
 
 DATASOURCE = {"type": "influxdb", "uid": "trevcan-influxdb"}
+REFRESH_INTERVALS = ["1s", "2s", "5s"]
+QUICK_RANGES = [
+    {"display": "Last 5 minutes", "from": "now-5m", "to": "now"},
+    {"display": "Last 15 minutes", "from": "now-15m", "to": "now"},
+    {"display": "Last 30 minutes", "from": "now-30m", "to": "now"},
+    {"display": "Last 1 hour", "from": "now-1h", "to": "now"},
+    {"display": "Last 6 hours", "from": "now-6h", "to": "now"},
+    {"display": "Last 12 hours", "from": "now-12h", "to": "now"},
+    {"display": "Last 24 hours", "from": "now-24h", "to": "now"},
+]
 
 
 def _signal_query(condition, *, dbc=None, latest=False, table=False, aggregate=False):
@@ -235,8 +245,11 @@ def _dashboard(uid, title, description, panels, *, variables=None):
         "editable": True,
         "graphTooltip": 1,
         "panels": panels,
-        "time": {"from": "now-15m", "to": "now"},
-        "timepicker": {"refresh_intervals": ["1s", "5s", "10s", "30s", "1m"]},
+        "time": {"from": "now-5m", "to": "now"},
+        "timepicker": {
+            "refresh_intervals": list(REFRESH_INTERVALS),
+            "quick_ranges": [dict(item) for item in QUICK_RANGES],
+        },
         "templating": {"list": variables or []},
         "annotations": {"list": []},
         "refresh": "5s",

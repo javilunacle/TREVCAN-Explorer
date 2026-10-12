@@ -52,7 +52,7 @@
             "type": "influxdb",
             "uid": "${DS_INFLUXDB}"
           },
-          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> filter(fn: (r) => r._field == \"seq\" or r._field == \"data\" or r._field == \"dlc\" or r._field == \"message\" or r._field == \"dbc\" or r._field == \"decoded\")\n  |> last()\n  |> group(columns: [\"car\", \"bus\", \"can_id\", \"ext\"])\n  |> pivot(rowKey: [\"_time\", \"car\", \"bus\", \"can_id\", \"ext\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.seq)\n  |> map(fn: (r) => ({r with dbc: if exists r.dbc then r.dbc else \"Unknown / undecoded\", message: if exists r.message then r.message else \"Unknown\"}))\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
+          "query": "from(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> filter(fn: (r) => r._field == \"seq\" or r._field == \"data\" or r._field == \"dlc\" or r._field == \"message\" or r._field == \"dbc\" or r._field == \"decoded\")\n  |> last()\n  |> map(fn: (r) => ({r with _value: string(v: r._value)}))\n  |> group(columns: [\"car\", \"bus\", \"can_id\", \"ext\"])\n  |> pivot(rowKey: [\"_time\", \"car\", \"bus\", \"can_id\", \"ext\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.seq)\n  |> map(fn: (r) => ({r with dbc: if exists r.dbc then r.dbc else \"Unknown / undecoded\", message: if exists r.message then r.message else \"Unknown\"}))\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
           "rawQuery": true,
           "resultFormat": "table"
         }
@@ -161,17 +161,23 @@
     }
   ],
   "time": {
-    "from": "now-1m",
+    "from": "now-5m",
     "to": "now"
   },
   "timepicker": {
     "refresh_intervals": [
       "1s",
       "2s",
-      "5s",
-      "10s",
-      "30s",
-      "1m"
+      "5s"
+    ],
+    "quick_ranges": [
+      {"display": "Last 5 minutes", "from": "now-5m", "to": "now"},
+      {"display": "Last 15 minutes", "from": "now-15m", "to": "now"},
+      {"display": "Last 30 minutes", "from": "now-30m", "to": "now"},
+      {"display": "Last 1 hour", "from": "now-1h", "to": "now"},
+      {"display": "Last 6 hours", "from": "now-6h", "to": "now"},
+      {"display": "Last 12 hours", "from": "now-12h", "to": "now"},
+      {"display": "Last 24 hours", "from": "now-24h", "to": "now"}
     ]
   },
   "templating": {

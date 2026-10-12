@@ -51,6 +51,19 @@ class GrafanaDashboardTests(unittest.TestCase):
             self.assertEqual(link["url"], "http://192.168.0.136:8080")
             self.assertTrue(link["targetBlank"])
 
+    def test_every_dashboard_uses_short_live_time_controls(self):
+        expected_refresh = ["1s", "2s", "5s"]
+        expected_ranges = ["now-5m", "now-15m", "now-30m", "now-1h",
+                           "now-6h", "now-12h", "now-24h"]
+        for _, dashboard in organized_dashboards():
+            self.assertEqual(dashboard["time"], {"from": "now-5m", "to": "now"})
+            self.assertEqual(dashboard["timepicker"]["refresh_intervals"],
+                             expected_refresh)
+            self.assertEqual(
+                [item["from"] for item in dashboard["timepicker"]["quick_ranges"]],
+                expected_ranges,
+            )
+
     def test_every_panel_has_a_flux_target_and_fixed_datasource(self):
         for _, dashboard in organized_dashboards():
             self.assertTrue(dashboard["panels"])
@@ -125,8 +138,10 @@ class GrafanaDashboardTests(unittest.TestCase):
 
         self.assertIn('|> range(start: -1m)', query)
         self.assertIn('|> last()', query)
+        self.assertIn('|> map(fn: (r) => ({r with _value: string(v: r._value)}))', query)
         self.assertIn('|> group(columns: ["car", "bus", "can_id", "ext"])', query)
         self.assertLess(query.index("|> last()"), query.index("|> pivot("))
+        self.assertLess(query.index("string(v: r._value)"), query.index("|> pivot("))
         self.assertIn('|> filter(fn: (r) => exists r.seq)', query)
         self.assertIn('|> limit(n: 500)', query)
         self.assertIn('"bus", "can_id"', query)
@@ -136,8 +151,14 @@ class GrafanaDashboardTests(unittest.TestCase):
         self.assertEqual(variables["dbc_file"]["allValue"], ".*")
         self.assertEqual(variables["can_bus"]["allValue"], ".*")
         self.assertEqual(dashboard["refresh"], "1s")
-        self.assertEqual(dashboard["time"]["from"], "now-1m")
-        self.assertIn("2s", dashboard["timepicker"]["refresh_intervals"])
+        self.assertEqual(dashboard["time"], {"from": "now-5m", "to": "now"})
+        self.assertEqual(dashboard["timepicker"]["refresh_intervals"],
+                         ["1s", "2s", "5s"])
+        self.assertEqual(
+            [item["from"] for item in dashboard["timepicker"]["quick_ranges"]],
+            ["now-5m", "now-15m", "now-30m", "now-1h", "now-6h", "now-12h",
+             "now-24h"],
+        )
         self.assertEqual(dashboard["links"][0]["url"], "http://192.168.0.136:8080")
         organize = table["transformations"][0]
         self.assertEqual(organize["id"], "organize")
