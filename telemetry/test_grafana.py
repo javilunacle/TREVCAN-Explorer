@@ -1,11 +1,14 @@
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
 import cantools
 
 from telemetry.grafana.dashboard_specs import organized_dashboards
+from telemetry.grafana import render_provisioned
 
 
 class GrafanaDashboardTests(unittest.TestCase):
@@ -43,6 +46,21 @@ class GrafanaDashboardTests(unittest.TestCase):
                 "TREVCAN - MOBO",
             },
         )
+
+    def test_rendered_dashboards_are_readable_by_grafana_container(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.draft.json"
+            source.write_text(json.dumps({"title": "draft"}), encoding="utf-8")
+            output = root / "generated"
+            with (patch.object(render_provisioned, "SOURCE_FILES", (source,)),
+                  patch.object(render_provisioned, "OUTPUT_DIRECTORY", output),
+                  patch.object(Path, "chmod") as chmod):
+                written = render_provisioned.render()
+
+            self.assertEqual(chmod.call_args_list[0], call(0o755))
+            self.assertEqual(chmod.call_args_list[1:],
+                             [call(0o644)] * len(written))
 
     def test_every_dashboard_links_to_supervised_test_controls(self):
         for _, dashboard in organized_dashboards():
