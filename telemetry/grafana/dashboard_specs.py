@@ -48,6 +48,21 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False, aggregate=F
     return query
 
 
+def _derived_query(condition, *, latest=False, aggregate=False):
+    query = (
+        'from(bucket: "home")\n'
+        '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
+        '  |> filter(fn: (r) => r._measurement == "telemetry_derived" and '
+        f'r._field == "value" and ({condition}))\n'
+        '  |> group(columns: ["signal"])'
+    )
+    if latest:
+        query += '\n  |> last()'
+    elif aggregate:
+        query += '\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)'
+    return query + '\n  |> keep(columns: ["_time", "_value", "signal", "unit", "session"])'
+
+
 def _target(query, result_format="time_series"):
     return {
         "refId": "A",
@@ -127,6 +142,101 @@ def stat(panel_id, title, signal, grid, *, dbc=None, unit=None,
             "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
             "textMode": "auto",
             "wideLayout": True,
+        },
+    }
+
+
+def derived_stat(panel_id, title, signal, grid, *, unit=None, description="",
+                 decimals=None):
+    panel = stat(panel_id, title, signal, grid, unit=unit,
+                 description=description, decimals=decimals)
+    panel["targets"] = [_target(_derived_query(
+        f'r.signal == "{signal}"', latest=True))]
+    return panel
+
+
+def derived_timeseries(panel_id, title, signals, grid, *, unit=None,
+                       description="", decimals=None):
+    condition = " or ".join(f'r.signal == "{signal}"' for signal in signals)
+    panel = timeseries(panel_id, title, condition, grid, unit=unit,
+                       description=description, decimals=decimals)
+    panel["targets"] = [_target(_derived_query(condition, aggregate=True))]
+    return panel
+
+
+def transform_events(panel_id, grid):
+    query = (
+        'from(bucket: "home")\n'
+        '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
+        '  |> filter(fn: (r) => r._measurement == "telemetry_event" and '
+        'r._field == "message")\n'
+        '  |> keep(columns: ["_time", "severity", "rule", "signal", "_value", '
+        '"session"])\n'
+        '  |> group()\n'
+        '  |> rename(columns: {_time: "time", _value: "message"})\n'
+        '  |> sort(columns: ["time"], desc: true)\n'
+        '  |> limit(n: 100)'
+    )
+    return {
+        "id": panel_id,
+        "title": "Transform diagnostics",
+        "type": "table",
+        "description": (
+            "Timestamp-based diagnostic events. These are engineering aids, not "
+            "vehicle safety interlocks or validated alarms."
+        ),
+        "gridPos": grid,
+        "datasource": DATASOURCE,
+        "targets": [_target(query, "table")],
+        "fieldConfig": {"defaults": {}, "overrides": []},
+        "options": {"cellHeight": "sm", "showHeader": True},
+    }
+
+
+def gg_plot(panel_id, grid):
+    query = (
+        'from(bucket: "home")\n'
+        '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
+        '  |> filter(fn: (r) => r._measurement == "vehicle_dynamics" and '
+        '(r._field == "longitudinal_g" or r._field == "lateral_g"))\n'
+        '  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n'
+        '  |> group(columns: ["car", "session"])\n'
+        '  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
+        '  |> keep(columns: ["_time", "longitudinal_g", "lateral_g", "session"])'
+    )
+    return {
+        "id": panel_id,
+        "title": "GG plot",
+        "type": "xychart",
+        "description": (
+            "Lateral versus longitudinal acceleration. Points appear only while the "
+            "CAN9 IMU reports valid data and a recent accepted alignment state."
+        ),
+        "gridPos": grid,
+        "datasource": DATASOURCE,
+        "targets": [_target(query, "table")],
+        "fieldConfig": {
+            "defaults": {
+                "unit": "accG",
+                "color": {"mode": "palette-classic"},
+                "custom": {
+                    "show": "points", "pointSize": {"fixed": 3},
+                    "axisPlacement": "auto", "axisLabel": "g",
+                    "axisColorMode": "text", "axisBorderShow": True,
+                    "axisCenteredZero": True,
+                    "scaleDistribution": {"type": "linear"},
+                    "hideFrom": {"tooltip": False, "viz": False, "legend": False},
+                },
+            },
+            "overrides": [],
+        },
+        "options": {
+            "seriesMapping": "manual",
+            "series": [{"pointColor": {}, "x": "lateral_g", "y": "longitudinal_g"}],
+            "dims": {"x": "lateral_g"},
+            "tooltip": {"mode": "single", "sort": "none"},
+            "legend": {"showLegend": False, "displayMode": "list",
+                       "placement": "bottom", "calcs": []},
         },
     }
 
@@ -585,10 +695,61 @@ def bms_dashboard():
     )
 
 
+def analysis_dashboard():
+    panels = [
+        live_can_status(1, {"x": 0, "y": 0, "w": 24, "h": 3}),
+        derived_stat(2, "Distance this test", "Distance_m",
+                     {"x": 0, "y": 3, "w": 4, "h": 4}, unit="lengthm", decimals=1),
+        derived_stat(3, "Energy used", "Energy_Used_Wh",
+                     {"x": 4, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1,
+                     description="Integrated discharge energy for the current test session."),
+        derived_stat(4, "Energy charged", "Energy_Charged_Wh",
+                     {"x": 8, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1,
+                     description="Working convention: positive HVC pack current is charging."),
+        derived_stat(5, "Net energy change", "Net_Energy_Change_Wh",
+                     {"x": 12, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1),
+        derived_stat(6, "Pack power", "Pack_Power_W",
+                     {"x": 16, "y": 3, "w": 4, "h": 4}, unit="watt", decimals=0,
+                     description="Positive is charging; negative is discharging."),
+        derived_stat(7, "IMU alignment valid", "IMU_Alignment_Valid",
+                     {"x": 20, "y": 3, "w": 4, "h": 4}, decimals=0,
+                     description="GG data is suppressed unless this is 1."),
+        derived_timeseries(
+            8, "Vehicle speed", ["Vehicle_Speed_mps"],
+            {"x": 0, "y": 7, "w": 12, "h": 8}, unit="velocityms",
+            description="VCU speed converted from mph to m/s using source timestamps."),
+        derived_timeseries(
+            9, "Acceleration from vehicle speed", ["Vehicle_Accel_From_Speed_mps2"],
+            {"x": 12, "y": 7, "w": 12, "h": 8}, unit="accMS2",
+            description="Smoothed local slope of speed; intended for engineering analysis."),
+        derived_timeseries(
+            10, "Pack power", ["Pack_Power_W"],
+            {"x": 0, "y": 15, "w": 12, "h": 8}, unit="watt",
+            description="Computed from the nearest voltage/current pair within 200 ms."),
+        derived_timeseries(
+            11, "Session energy", ["Energy_Used_Wh", "Energy_Charged_Wh",
+                                   "Net_Energy_Change_Wh"],
+            {"x": 12, "y": 15, "w": 12, "h": 8}, unit="watth"),
+        gg_plot(12, {"x": 0, "y": 23, "w": 12, "h": 10}),
+        derived_timeseries(
+            13, "Accumulator temperature rise rate",
+            ["Accumulator_Temp_Rise_C_per_s"],
+            {"x": 12, "y": 23, "w": 12, "h": 10}, unit="suffix:degC/s",
+            description="Rolling timestamp-based slope of HVC maximum accumulator temperature."),
+        transform_events(14, {"x": 0, "y": 33, "w": 24, "h": 8}),
+    ]
+    return _dashboard(
+        "trevcan-live-analysis", "TREVCAN - Live Analysis",
+        "Session-aware derived telemetry calculated on the telemetry Pi from source timestamps.",
+        panels,
+    )
+
+
 def organized_dashboards():
     """Return stable filenames and dashboard documents for provisioning."""
     return [
         ("trevcan-overview.json", overview_dashboard()),
+        ("trevcan-live-analysis.json", analysis_dashboard()),
         ("trevcan-bms.json", bms_dashboard()),
         ("trevcan-hvc.json", hvc_dashboard()),
         ("trevcan-inverter.json", inverter_dashboard()),

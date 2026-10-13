@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "current_positive_direction": "charge",
+  "policies": {
+    "fast": {
+      "publish_period_ms": 100,
+      "max_gap_ms": 500
+    },
+    "medium": {
+      "publish_period_ms": 200,
+      "max_gap_ms": 1000
+    },
+    "slow": {
+      "publish_period_ms": 1000,
+      "max_gap_ms": 5000
+    },
+    "event": {
+      "publish_period_ms": 1000,
+      "max_gap_ms": 5000
+    }
+  },
+  "derivatives": {
+    "speed_window_ms": 500,
+    "temperature_window_ms": 5000
+  },
+  "electrical_pair_max_age_ms": 200,
+  "imu_alignment": {
+    "accepted_status_values": [2, 3],
+    "max_age_ms": 5000
+  },
+  "temperature_spike": {
+    "enabled": true,
+    "delta_c": 20.0,
+    "window_ms": 1000,
+    "cooldown_ms": 5000
+  },
+  "sources": {
+    "vehicle_speed": {
+      "buses": ["can0", "can1"],
+      "dbc": "VCU.dbc",
+      "message": "VCU_Summary",
+      "signal": "VCU_Speed_MPH"
+    },
+    "pack_voltage": {
+      "bus": "can0",
+      "dbc": "hvc.dbc",
+      "message": "HVC_IO_VSense",
+      "signal": "HVC_Batt_Voltage_V"
+    },
+    "pack_current": {
+      "bus": "can0",
+      "dbc": "hvc.dbc",
+      "message": "HVC_IO_Current",
+      "signal": "HVC_Pack_Current_A"
+    },
+    "accumulator_temp_max": {
+      "bus": "can0",
+      "dbc": "hvc.dbc",
+      "message": "HVC_ACC_Summary",
+      "signal": "HVC_Acc_Temp_Max_C"
+    },
+    "imu_alignment": {
+      "bus": "can1",
+      "dbc": "can9-database-01.09.dbc",
+      "message": "ImuAlign"
+    },
+    "imu_data": {
+      "bus": "can1",
+      "dbc": "can9-database-01.09.dbc",
+      "message": "ImuData"
+    }
+  }
+}

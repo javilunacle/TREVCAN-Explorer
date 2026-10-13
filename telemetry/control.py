@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .transforms import SessionRegistry
+
 
 INDEX_HTML = r"""<!doctype html>
 <html lang="en">
@@ -301,15 +303,18 @@ class ControlConfig:
     receiver_unit: str = "trevcan-telemetry-receiver.service"
     receiver_port: int = 8765
     command_timeout: float = 60
+    session_file: Path = Path.home() / "trevcan-data/telemetry-sessions.json"
 
 
 class TestController:
     ACTIONS = frozenset({"status", "start", "stop"})
 
-    def __init__(self, config, *, runner=subprocess.run, connector=socket.create_connection):
+    def __init__(self, config, *, runner=subprocess.run, connector=socket.create_connection,
+                 session_registry=None):
         self.config = config
         self.runner = runner
         self.connector = connector
+        self.sessions = session_registry or SessionRegistry(config.session_file)
         self.action_lock = threading.Lock()
 
     def _run(self, argv, *, timeout=None, allow_failure=False):
@@ -370,20 +375,35 @@ class TestController:
             car = self._remote("status")
         except ControlError as exc:
             car = {"ok": False, "state": "offline", "error": str(exc)}
-        return {"ok": True, "receiver": self._receiver_state(), "car": car}
+        return {"ok": True, "receiver": self._receiver_state(), "car": car,
+                "session": self.sessions.active()}
 
     def start_test(self):
         with self.action_lock:
-            self._start_receiver()
-            self._remote("start")
+            try:
+                car_before = self._remote("status")
+            except ControlError:
+                car_before = {"state": "offline"}
+            previous = self.sessions.active()
+            session = self.sessions.start(
+                force_new=car_before.get("state") != "running")
+            created = previous is None or previous.get("id") != session["id"]
+            try:
+                self._start_receiver()
+                self._remote("start")
+            except Exception:
+                if created:
+                    self.sessions.end()
+                raise
             return {"message": "Test started; receiver and car capture are running.",
-                    "status": self.status()}
+                    "session": session, "status": self.status()}
 
     def stop_capture(self):
         with self.action_lock:
             self._remote("stop")
+            session = self.sessions.end()
             return {"message": "Test ended and telemetry stopped; the car Pi remains powered.",
-                    "status": self.status()}
+                    "session": session, "status": self.status()}
 
     def end_test(self):
         return self.stop_capture()
@@ -467,6 +487,8 @@ def main():
         "TELEMETRY_CONTROL_IDENTITY", "~/.config/trevcan/control_ed25519")).expanduser())
     parser.add_argument("--known-hosts", type=Path, default=Path(os.getenv(
         "TELEMETRY_CONTROL_KNOWN_HOSTS", "~/.config/trevcan/control_known_hosts")).expanduser())
+    parser.add_argument("--session-file", type=Path, default=Path(os.getenv(
+        "TREVCAN_SESSION_FILE", "~/trevcan-data/telemetry-sessions.json")).expanduser())
     args = parser.parse_args()
 
     if not re.fullmatch(r"[A-Za-z0-9.-]+", args.car_host):
@@ -482,7 +504,8 @@ def main():
 
     config = ControlConfig(
         car_host=args.car_host, car_user=args.car_user,
-        ssh_identity=args.identity, known_hosts=args.known_hosts)
+        ssh_identity=args.identity, known_hosts=args.known_hosts,
+        session_file=args.session_file)
     server = ControlHTTPServer((args.host, args.port), TestController(config))
     print(f"[control] listening on http://{args.host}:{args.port}", flush=True)
     try:

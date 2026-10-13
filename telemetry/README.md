@@ -16,7 +16,8 @@ car can0/can1
   -> authenticated TCP batches
   -> telemetry-Pi SQLite durable commit
   -> cumulative ACK to car
-  -> bus-aware DBC decoding and 100 ms visualization snapshots
+  -> bus-aware DBC decoding
+  -> source-timestamp live transforms and 100 ms visualization snapshots
   -> InfluxDB
   -> Grafana viewers
 ```
@@ -198,9 +199,12 @@ Then the test operator does not need SSH:
 1. Power the router, telemetry Pi, and car Pi.
 2. Open `http://192.168.0.136:8080`.
 3. Select **Start Test**. This starts the receiver first, waits for TCP port
-   8765, and then starts the dual-bus car sender.
+   8765, creates/reuses the current analysis session, and then starts the
+   dual-bus car sender.
 4. Open Grafana at `http://192.168.0.136:3000`. All provisioned dashboards
-   include a **Telemetry tools** link back to TREVCAN Telemetry Tools.
+   include a **Telemetry tools** link back to TREVCAN Telemetry Tools. Use
+   **TREVCAN - Live Analysis** for distance, power/energy, rate of temperature
+   change, transform diagnostics, and the alignment-gated GG plot.
 5. Select **End Test - Stop Telemetry** when capture should stop. This cleanly
    stops and syncs only the telemetry sender. The car Pi and every other car
    service remain powered.
@@ -247,6 +251,8 @@ Expected behavior:
 - `pending_influx` remains bounded and falls after input stops.
 - Grafana timestamps remain close to current time.
 - Both `can0` and `can1` appear in the current data.
+- The Live Analysis dashboard begins a new set of distance and energy totals
+  for each new supervised test session.
 
 Service logs:
 
@@ -267,6 +273,10 @@ journalctl --user -u trevcan-telemetry-car.service -f
   raw rows are retained for 15 minutes by default, then pruned. Unexported rows
   are never pruned by the age policy.
 - The InfluxDB `home` bucket retains dashboard data for 24 hours.
+- Transform checkpoints are stored in telemetry-Pi SQLite in the same
+  transaction that marks a raw batch exported. If an Influx write is retried,
+  distance and energy are recomputed from the prior checkpoint instead of
+  being counted twice.
 - The same SQLite files are reused across Stop/Start and reconnects. Do not
   create a different database for every test.
 
@@ -276,6 +286,36 @@ remain in the car spool. Because boot startup is disabled, select **Start Test**
 after the next boot to resume and drain them.
 
 Do not delete an active SQLite file or its `-wal`, `-shm`, or `.lock` files.
+
+## Live-analysis policy
+
+The receiver reads `telemetry/transform_policies.json`. Calculations consume
+every selected decoded update in source-timestamp order; the fast/medium/slow
+policy changes only how often derived points are published to InfluxDB. It does
+not replace the raw or decoded measurements. The initial publication targets
+are 10 Hz for fast outputs, 5 Hz for medium outputs, and 1 Hz for slow outputs.
+This work runs in the telemetry-Pi export worker after the durable raw ACK path;
+it adds no transform processing to the car Pi.
+
+The initial policy provides:
+
+- mph-to-m/s conversion, distance integration, and a rolling speed derivative;
+- pack power plus charge/discharge amp-hours and energy totals;
+- maximum-accumulator-temperature slope and a diagnostic event for a 20 degC
+  change within one second;
+- CAN9 longitudinal/lateral acceleration and GG points only when `ImuValid` is
+  set and `ImuAlign` reports a recent accepted alignment without errors.
+
+Voltage and current messages do not need identical timestamps. The transform
+uses the latest available pair when their timestamps are within 200 ms and
+timestamps the result at the newer sample. Integrals use the actual elapsed
+source time and stop across gaps larger than the policy limit rather than
+inventing missing data.
+
+The working HVC convention is **positive pack current = charging** and negative
+pack current = discharging. It is explicit in the policy so it can be reversed
+after the sign is verified against a known charge and traction test. Transform
+warnings are diagnostic engineering aids, not safety alarms or interlocks.
 
 ## Current troubleshooting
 

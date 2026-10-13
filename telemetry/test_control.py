@@ -1,5 +1,6 @@
 import json
 import subprocess
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -38,17 +39,22 @@ class _Runner:
 
 class TestControllerTests(unittest.TestCase):
     def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
         self.runner = _Runner()
         self.config = ControlConfig(
             car_host="192.168.0.145",
             car_user="trevor",
             ssh_identity=Path("/fixed/control-key"),
             known_hosts=Path("/fixed/known-hosts"),
+            session_file=Path(self.temporary.name) / "sessions.json",
         )
         self.controller = TestController(
             self.config, runner=self.runner,
             connector=lambda *args, **kwargs: _Connection(),
         )
+
+    def tearDown(self):
+        self.temporary.cleanup()
 
     def test_remote_command_is_fixed_and_host_key_checking_is_strict(self):
         response = self.controller._remote("status")

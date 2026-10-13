@@ -28,13 +28,14 @@ class GrafanaDashboardTests(unittest.TestCase):
 
     def test_dashboard_names_and_uids_are_unique(self):
         dashboards = organized_dashboards()
-        self.assertEqual(len(dashboards), 6)
+        self.assertEqual(len(dashboards), 7)
         self.assertEqual(len({filename for filename, _ in dashboards}), len(dashboards))
         self.assertEqual(len({dashboard["uid"] for _, dashboard in dashboards}), len(dashboards))
         self.assertEqual(
             {dashboard["title"] for _, dashboard in dashboards},
             {
                 "TREVCAN - Vehicle Overview",
+                "TREVCAN - Live Analysis",
                 "TREVCAN - BMS",
                 "TREVCAN - HVC",
                 "TREVCAN - Inverter",
@@ -73,11 +74,11 @@ class GrafanaDashboardTests(unittest.TestCase):
                 for target in panel["targets"]:
                     self.assertEqual(target["datasource"]["uid"], "trevcan-influxdb")
                     self.assertIn('from(bucket: "home")', target["query"])
-                    expected_measurement = (
-                        "can_frame" if panel["title"] == "Live CAN telemetry" else "can_signal"
+                    self.assertRegex(
+                        target["query"],
+                        r'r\._measurement == "(can_frame|can_signal|telemetry_derived|'
+                        r'telemetry_event|vehicle_dynamics)"',
                     )
-                    self.assertIn(
-                        f'r._measurement == "{expected_measurement}"', target["query"])
 
     def test_explicit_signal_and_message_names_exist_in_repository_dbcs(self):
         missing_signals = set()
@@ -86,6 +87,8 @@ class GrafanaDashboardTests(unittest.TestCase):
             for panel in dashboard["panels"]:
                 for target in panel["targets"]:
                     query = target["query"]
+                    if 'r._measurement == "can_signal"' not in query:
+                        continue
                     missing_signals.update(
                         name
                         for name in re.findall(r'r\.signal == "([^"]+)"', query)
@@ -116,6 +119,18 @@ class GrafanaDashboardTests(unittest.TestCase):
                     self.assertIn("|> last()", query)
                 if panel["title"] != "Live CAN telemetry":
                     self.assertIn("|> keep(columns:", query)
+
+    def test_live_analysis_uses_derived_measurements_and_xy_gg_plot(self):
+        dashboard = dict(organized_dashboards())["trevcan-live-analysis.json"]
+        measurements = "\n".join(
+            panel["targets"][0]["query"] for panel in dashboard["panels"])
+        self.assertIn('r._measurement == "telemetry_derived"', measurements)
+        self.assertIn('r._measurement == "telemetry_event"', measurements)
+        self.assertIn('r._measurement == "vehicle_dynamics"', measurements)
+        gg = next(panel for panel in dashboard["panels"] if panel["title"] == "GG plot")
+        self.assertEqual(gg["type"], "xychart")
+        self.assertEqual(gg["options"]["series"][0]["x"], "lateral_g")
+        self.assertEqual(gg["options"]["series"][0]["y"], "longitudinal_g")
 
     def test_overview_has_read_only_recent_can_status(self):
         dashboard = dict(organized_dashboards())["trevcan-overview.json"]

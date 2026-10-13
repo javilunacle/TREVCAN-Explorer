@@ -11,11 +11,13 @@ import urllib.request
 from pathlib import Path
 
 from .common import validate_frame, wire_line
+from .transforms import TransformEngine, TransformPlan
 
 
 class RawStore:
     def __init__(self, path):
         path = Path(path)
+        self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         new_database = not path.exists()
         self.db = sqlite3.connect(path)
@@ -40,6 +42,10 @@ class RawStore:
                 "ALTER TABLE raw_frames ADD COLUMN received_ns INTEGER NOT NULL DEFAULT 0")
         self.db.execute("""CREATE TABLE IF NOT EXISTS streams (
             car_id TEXT PRIMARY KEY, last_seq INTEGER NOT NULL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS transform_state (
+            session_id TEXT NOT NULL, car_id TEXT NOT NULL, transform TEXT NOT NULL,
+            state_json TEXT NOT NULL, updated_ns INTEGER NOT NULL,
+            PRIMARY KEY (session_id, car_id, transform))""")
         self.db.execute("CREATE INDEX IF NOT EXISTS raw_pending ON raw_frames(influx_done, car_id, seq)")
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS raw_retention ON raw_frames(influx_done, received_ns)")
@@ -108,7 +114,28 @@ class RawStore:
                  "is_fd": bool(r[7]), "is_error": bool(r[8]), "dlc": r[9],
                  "data": r[10]} for r in rows]
 
-    def mark_exported(self, frames):
+    def load_transform_state(self, session_id, car_id, transform):
+        # Transform preparation runs in a worker thread because DBC decoding is
+        # CPU-heavy. Use a short-lived read connection instead of sharing the
+        # receiver's event-loop connection across threads.
+        reader = sqlite3.connect(self.path)
+        try:
+            row = reader.execute(
+                "SELECT state_json FROM transform_state "
+                "WHERE session_id=? AND car_id=? AND transform=?",
+                (session_id, car_id, transform),
+            ).fetchone()
+        finally:
+            reader.close()
+        if row is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def finish_export(self, frames, transform_states=()):
+        """Atomically checkpoint the raw batch and its derived transform state."""
         with self.db:
             ranges = {}
             for frame in frames:
@@ -118,6 +145,19 @@ class RawStore:
             self.db.executemany(
                 "UPDATE raw_frames SET influx_done=1 WHERE car_id=? AND seq BETWEEN ? AND ?",
                 [(car_id, bounds[0], bounds[1]) for car_id, bounds in ranges.items()])
+            self.db.executemany(
+                """INSERT INTO transform_state
+                   (session_id,car_id,transform,state_json,updated_ns)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(session_id,car_id,transform) DO UPDATE SET
+                       state_json=excluded.state_json,
+                       updated_ns=excluded.updated_ns""",
+                [(session_id, car_id, transform, state_json, time.time_ns())
+                 for session_id, car_id, transform, state_json in transform_states],
+            )
+
+    def mark_exported(self, frames):
+        self.finish_export(frames)
 
     def prune_exported(self, retention_seconds, *, limit=100000, now_ns=None):
         """Delete only successfully exported raw rows older than the staging window.
@@ -312,12 +352,14 @@ def influx_lines(frames, decoder):
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def influx_snapshot_lines(frames, decoder):
-    """Decode all inputs but export only current raw/message and signal values."""
+def prepare_influx_snapshot(frames, decoder, transformer=None):
+    """Decode once, build the live snapshot, and stage derived transform state."""
     latest_frames = {}
     latest_signals = {}
+    decoded_frames = []
     for frame in frames:
         decoded = decoder.decode(frame)
+        decoded_frames.append((frame, decoded))
         frame_key = (frame["car_id"], frame.get("bus", "unknown"),
                      frame["can_id"], frame["is_extended"])
         latest_frames[frame_key] = (frame, decoded)
@@ -375,7 +417,14 @@ def influx_snapshot_lines(frames, decoder):
         else:
             continue
         lines.append(f"can_signal,{tags} {','.join(signal_fields)} {frame['timestamp_ns']}")
-    return "\n".join(lines) + ("\n" if lines else "")
+    payload = "\n".join(lines) + ("\n" if lines else "")
+    plan = transformer.prepare(decoded_frames) if transformer else TransformPlan([], {})
+    return payload + plan.line_protocol(), plan
+
+
+def influx_snapshot_lines(frames, decoder):
+    """Compatibility wrapper returning the raw and decoded live snapshot."""
+    return prepare_influx_snapshot(frames, decoder)[0]
 
 
 def post_influx(url, token, payload):
@@ -389,7 +438,7 @@ def post_influx(url, token, payload):
 
 
 async def export_forever(store, decoder, url, token, stop=None, *, batch_size=5000,
-                         interval_seconds=0.1):
+                         interval_seconds=0.1, transformer=None):
     stop = stop or asyncio.Event()
     while not stop.is_set():
         try:
@@ -401,10 +450,20 @@ async def export_forever(store, decoder, url, token, stop=None, *, batch_size=50
         if not batch:
             continue
         try:
-            payload = await asyncio.to_thread(influx_snapshot_lines, batch, decoder)
+            try:
+                payload, plan = await asyncio.to_thread(
+                    prepare_influx_snapshot, batch, decoder, transformer)
+            except Exception as exc:
+                # Raw and ordinary decoded telemetry remain available even if a
+                # transform policy has a bug or receives an unexpected value.
+                print(f"[transform] batch skipped: {exc}", flush=True)
+                payload, plan = await asyncio.to_thread(
+                    prepare_influx_snapshot, batch, decoder, None)
             await asyncio.to_thread(post_influx, url, token, payload)
-            store.mark_exported(batch)
-        except (OSError, urllib.error.HTTPError, RuntimeError) as exc:
+            store.finish_export(batch, plan.persisted_states())
+            if transformer is not None:
+                transformer.commit(plan)
+        except Exception as exc:
             print(f"[influx] export failed: {exc}; raw frames retained", flush=True)
             try:
                 await asyncio.wait_for(stop.wait(), 2)
@@ -459,6 +518,12 @@ async def serve_client(reader, writer, store, token):
 async def run(args):
     store = RawStore(args.db)
     decoder = DBCDecoder(args.dbc, parse_bus_dbcs(args.dbc_bus))
+    transformer = None
+    if args.transform_policy:
+        transformer = TransformEngine(
+            args.transform_policy, args.session_file, store.load_transform_state)
+        print(f"[transform] policy={args.transform_policy} "
+              f"sessions={args.session_file or 'unassigned'}", flush=True)
     print(f"[server] {store.quick_status()}", flush=True)
     try:
         server = await asyncio.start_server(
@@ -469,7 +534,9 @@ async def run(args):
             if args.influx_url:
                 async with asyncio.TaskGroup() as group:
                     group.create_task(server.serve_forever())
-                    group.create_task(export_forever(store, decoder, args.influx_url, args.influx_token))
+                    group.create_task(export_forever(
+                        store, decoder, args.influx_url, args.influx_token,
+                        transformer=transformer))
                     if args.raw_retention_hours > 0:
                         group.create_task(prune_forever(
                             store, args.raw_retention_hours * 60 * 60))
@@ -492,6 +559,12 @@ def main():
         help="DBC restricted to one capture bus; repeat in decode priority order")
     parser.add_argument("--influx-url", help="full InfluxDB v2 write URL with precision=ns")
     parser.add_argument("--influx-token", default=os.getenv("INFLUXDB_TOKEN"))
+    parser.add_argument(
+        "--transform-policy", type=Path,
+        help="JSON policy file for timestamp-based live derived signals")
+    parser.add_argument(
+        "--session-file", type=Path,
+        help="test-session catalog shared with TREVCAN Telemetry Tools")
     parser.add_argument(
         "--raw-retention-hours", type=float,
         default=float(os.getenv("TELEMETRY_RAW_RETENTION_HOURS", "0")),
