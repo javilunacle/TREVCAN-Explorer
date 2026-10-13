@@ -317,6 +317,49 @@ pack current = discharging. It is explicit in the policy so it can be reversed
 after the sign is verified against a known charge and traction test. Transform
 warnings are diagnostic engineering aids, not safety alarms or interlocks.
 
+## Synthetic end-to-end scenarios
+
+Run synthetic scenarios on the **telemetry Pi**, with the real car test ended.
+They use a unique `scenario-*` car ID and the normal authenticated TCP receiver,
+DBC decoder, transform worker, InfluxDB, and Grafana path. They never open
+SocketCAN and never transmit onto `can0` or `can1`. Do not run them alongside a
+real test because the current dashboards do not yet filter by car ID.
+
+Start only the receiver, list the available scenarios, and run the full suite:
+
+```bash
+cd ~/TREVCAN-Explorer
+systemctl --user start trevcan-telemetry-receiver.service
+bash telemetry/run_scenario_pi.sh --list
+bash telemetry/run_scenario_pi.sh --scenario all
+```
+
+The wrapper reads both tokens from `.env.telemetry`, uses a temporary durable
+spool, waits for every frame to be acknowledged, and verifies the expected
+InfluxDB output. Open **TREVCAN - Live Analysis** with **Last 5 minutes** selected
+to see the derived results and GG points. Open **TREVCAN - HVC** to see the
+synthetic HVC fault bits.
+
+Focused examples:
+
+```bash
+bash telemetry/run_scenario_pi.sh --scenario temperature-spike
+bash telemetry/run_scenario_pi.sh --scenario gg-valid
+bash telemetry/run_scenario_pi.sh --scenario gg-invalid
+bash telemetry/run_scenario_pi.sh --scenario stale-electrical-pair
+bash telemetry/run_scenario_pi.sh --scenario spool-drain
+```
+
+`temperature-spike` verifies the current diagnostic warning rule.
+`gg-invalid` and `stale-electrical-pair` are negative tests: they pass only when
+GG or pack-power output is correctly suppressed. `spool-drain` captures all
+samples before opening the TCP connection, then confirms that the temporary
+SQLite backlog drains. Stop the receiver afterward if no real test is active:
+
+```bash
+systemctl --user stop trevcan-telemetry-receiver.service
+```
+
 ## Current troubleshooting
 
 ### TREVCAN Telemetry Tools is unavailable
