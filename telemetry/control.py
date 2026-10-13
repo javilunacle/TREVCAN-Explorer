@@ -66,6 +66,16 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 6px; color: #91a0fa; background: rgba(102, 126, 234, .16);
       font-size: 11px; font-weight: 750; letter-spacing: .08em;
     }
+    .header-actions { display: flex; align-items: center; gap: 10px; }
+    .header-link {
+      min-height: 36px; display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border: 1px solid #3b4368; border-radius: 7px;
+      color: #f5f5f5; background: rgba(102, 126, 234, .14);
+      text-decoration: none; font-size: 12px; font-weight: 750;
+      transition: transform .16s ease, background .16s ease, border-color .16s ease;
+    }
+    .header-link:hover { transform: translateY(-1px); background: rgba(102, 126, 234, .25); border-color: #667eea; }
+    .header-link:focus-visible { outline: 3px solid rgba(102, 126, 234, .6); outline-offset: 2px; }
     main { max-width: 1080px; margin: 0 auto; padding: 34px 24px 48px; }
     .eyebrow {
       margin: 0 0 7px; color: #ef4444; font-size: 11px; font-weight: 800;
@@ -136,6 +146,8 @@ INDEX_HTML = r"""<!doctype html>
     @media (max-width: 720px) {
       .header-content, main { padding-left: 16px; padding-right: 16px; }
       .header-badge { display: none; }
+      .header-link { padding: 8px 10px; }
+      .header-link-label { display: none; }
       .brand { gap: 11px; }
       .brand-icon { width: 38px; height: 38px; flex-basis: 38px; border-radius: 9px; }
       .brand-icon svg { width: 23px; height: 23px; }
@@ -160,7 +172,12 @@ INDEX_HTML = r"""<!doctype html>
         <p class="brand-subtitle">Vehicle telemetry test control</p>
       </div>
     </div>
-    <div class="header-badge">TELEMETRY</div>
+    <div class="header-actions">
+      <a id="grafana-link" class="header-link" href="http://telemetrypi.local:3000/dashboards" target="_blank" rel="noopener">
+        <span aria-hidden="true">&#8599;</span><span class="header-link-label">Open Grafana dashboards</span><span class="header-link-label" aria-hidden="true">&#8594;</span>
+      </a>
+      <div class="header-badge">TELEMETRY</div>
+    </div>
   </div>
 </header>
 <main>
@@ -230,6 +247,13 @@ const sender = document.getElementById('sender');
 const startup = document.getElementById('startup');
 const updated = document.getElementById('updated');
 const buttons = [...document.querySelectorAll('button')];
+const grafanaLink = document.getElementById('grafana-link');
+const grafanaUrl = new URL(window.location.href);
+grafanaUrl.port = '3000';
+grafanaUrl.pathname = '/dashboards';
+grafanaUrl.search = '';
+grafanaUrl.hash = '';
+grafanaLink.href = grafanaUrl.toString();
 async function call(path, method='GET') {
   const response = await fetch(path, {
     method,

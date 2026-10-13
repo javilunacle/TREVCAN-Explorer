@@ -31,7 +31,7 @@ class GrafanaDashboardTests(unittest.TestCase):
 
     def test_dashboard_names_and_uids_are_unique(self):
         dashboards = organized_dashboards()
-        self.assertEqual(len(dashboards), 7)
+        self.assertEqual(len(dashboards), 8)
         self.assertEqual(len({filename for filename, _ in dashboards}), len(dashboards))
         self.assertEqual(len({dashboard["uid"] for _, dashboard in dashboards}), len(dashboards))
         self.assertEqual(
@@ -39,6 +39,7 @@ class GrafanaDashboardTests(unittest.TestCase):
             {
                 "TREVCAN - Vehicle Overview",
                 "TREVCAN - Live Analysis",
+                "TREVCAN - Synthetic Validation",
                 "TREVCAN - BMS",
                 "TREVCAN - HVC",
                 "TREVCAN - Inverter",
@@ -67,7 +68,7 @@ class GrafanaDashboardTests(unittest.TestCase):
             self.assertEqual(len(dashboard["links"]), 1)
             link = dashboard["links"][0]
             self.assertEqual(link["title"], "Telemetry tools")
-            self.assertEqual(link["url"], "http://192.168.0.136:8080")
+            self.assertEqual(link["url"], "http://telemetrypi.local")
             self.assertTrue(link["targetBlank"])
 
     def test_every_dashboard_uses_short_live_time_controls(self):
@@ -150,6 +151,38 @@ class GrafanaDashboardTests(unittest.TestCase):
         self.assertEqual(gg["options"]["series"][0]["x"], "lateral_g")
         self.assertEqual(gg["options"]["series"][0]["y"], "longitudinal_g")
 
+    def test_real_dashboards_exclude_scenarios_and_validation_includes_only_them(self):
+        dashboards = dict(organized_dashboards())
+        for filename, dashboard in dashboards.items():
+            queries = "\n".join(
+                target["query"]
+                for panel in dashboard["panels"]
+                for target in panel["targets"]
+            )
+            if filename == "trevcan-synthetic-validation.json":
+                self.assertIn('r.car =~ /^scenario-/', queries)
+                self.assertNotIn('r.car !~ /^scenario-/', queries)
+            else:
+                self.assertIn('r.car !~ /^scenario-/', queries)
+                self.assertNotIn('r.car =~ /^scenario-/', queries)
+
+    def test_analysis_dashboards_group_streams_and_offer_session_review(self):
+        dashboards = dict(organized_dashboards())
+        for filename in ("trevcan-live-analysis.json",
+                         "trevcan-synthetic-validation.json"):
+            dashboard = dashboards[filename]
+            variables = dashboard["templating"]["list"]
+            self.assertEqual([item["name"] for item in variables], ["test_session"])
+            self.assertTrue(variables[0]["includeAll"])
+            self.assertEqual(variables[0]["allValue"], ".*")
+            for panel in dashboard["panels"]:
+                query = panel["targets"][0]["query"]
+                if 'r._measurement == "telemetry_derived"' in query:
+                    self.assertIn(
+                        '|> group(columns: ["car", "session", "signal"])', query)
+                    self.assertIn('r.session =~ /^${test_session:regex}$/', query)
+                    self.assertIn('"car", "session"', query)
+
     def test_overview_has_read_only_recent_can_status(self):
         dashboard = dict(organized_dashboards())["trevcan-overview.json"]
         status = dashboard["panels"][0]
@@ -194,7 +227,7 @@ class GrafanaDashboardTests(unittest.TestCase):
             ["now-5m", "now-15m", "now-30m", "now-1h", "now-6h", "now-12h",
              "now-24h"],
         )
-        self.assertEqual(dashboard["links"][0]["url"], "http://192.168.0.136:8080")
+        self.assertEqual(dashboard["links"][0]["url"], "http://telemetrypi.local")
         organize = table["transformations"][0]
         self.assertEqual(organize["id"], "organize")
         self.assertEqual(organize["options"]["indexByName"]["dbc"], 0)

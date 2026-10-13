@@ -55,4 +55,5 @@ else
 fi
 echo "Start:  systemctl --user start trevcan-telemetry-control.service"
 echo "Stop:   systemctl --user stop trevcan-telemetry-control.service"
-echo "Open:   http://192.168.0.136:8080"
+echo "Open:   http://telemetrypi.local (after install_friendly_url_pi.sh)"
+echo "Direct: http://192.168.0.136:8080"

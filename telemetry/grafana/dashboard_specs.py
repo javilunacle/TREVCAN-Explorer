@@ -18,10 +18,20 @@ QUICK_RANGES = [
 ]
 
 
-def _signal_query(condition, *, dbc=None, latest=False, table=False, aggregate=False):
+def _stream_condition(stream):
+    if stream == "real":
+        return 'r.car !~ /^scenario-/'
+    if stream == "scenario":
+        return 'r.car =~ /^scenario-/'
+    raise ValueError(f"unknown telemetry stream kind: {stream}")
+
+
+def _signal_query(condition, *, dbc=None, latest=False, table=False,
+                  aggregate=False, stream="real"):
     filters = [
         'r._measurement == "can_signal"',
         'r._field == "value"',
+        _stream_condition(stream),
         f"({condition})",
     ]
     if dbc:
@@ -48,19 +58,21 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False, aggregate=F
     return query
 
 
-def _derived_query(condition, *, latest=False, aggregate=False):
+def _derived_query(condition, *, latest=False, aggregate=False, stream="real"):
     query = (
         'from(bucket: "home")\n'
         '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
         '  |> filter(fn: (r) => r._measurement == "telemetry_derived" and '
-        f'r._field == "value" and ({condition}))\n'
-        '  |> group(columns: ["signal"])'
+        f'r._field == "value" and {_stream_condition(stream)} and '
+        f'r.session =~ /^${{test_session:regex}}$/ and ({condition}))\n'
+        '  |> group(columns: ["car", "session", "signal"])'
     )
     if latest:
         query += '\n  |> last()'
     elif aggregate:
         query += '\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)'
-    return query + '\n  |> keep(columns: ["_time", "_value", "signal", "unit", "session"])'
+    return query + ('\n  |> keep(columns: ["_time", "_value", "signal", "unit", '
+                    '"car", "session"])')
 
 
 def _target(query, result_format="time_series"):
@@ -147,29 +159,31 @@ def stat(panel_id, title, signal, grid, *, dbc=None, unit=None,
 
 
 def derived_stat(panel_id, title, signal, grid, *, unit=None, description="",
-                 decimals=None):
+                 decimals=None, stream="real"):
     panel = stat(panel_id, title, signal, grid, unit=unit,
                  description=description, decimals=decimals)
     panel["targets"] = [_target(_derived_query(
-        f'r.signal == "{signal}"', latest=True))]
+        f'r.signal == "{signal}"', latest=True, stream=stream))]
     return panel
 
 
 def derived_timeseries(panel_id, title, signals, grid, *, unit=None,
-                       description="", decimals=None):
+                       description="", decimals=None, stream="real"):
     condition = " or ".join(f'r.signal == "{signal}"' for signal in signals)
     panel = timeseries(panel_id, title, condition, grid, unit=unit,
                        description=description, decimals=decimals)
-    panel["targets"] = [_target(_derived_query(condition, aggregate=True))]
+    panel["targets"] = [_target(_derived_query(
+        condition, aggregate=True, stream=stream))]
     return panel
 
 
-def transform_events(panel_id, grid):
+def transform_events(panel_id, grid, *, stream="real"):
     query = (
         'from(bucket: "home")\n'
         '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
         '  |> filter(fn: (r) => r._measurement == "telemetry_event" and '
-        'r._field == "message")\n'
+        f'r._field == "message" and {_stream_condition(stream)} and '
+        'r.session =~ /^${test_session:regex}$/)\n'
         '  |> keep(columns: ["_time", "severity", "rule", "signal", "_value", '
         '"session"])\n'
         '  |> group()\n'
@@ -193,16 +207,17 @@ def transform_events(panel_id, grid):
     }
 
 
-def gg_plot(panel_id, grid):
+def gg_plot(panel_id, grid, *, stream="real"):
     query = (
         'from(bucket: "home")\n'
         '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
         '  |> filter(fn: (r) => r._measurement == "vehicle_dynamics" and '
+        f'{_stream_condition(stream)} and r.session =~ /^${{test_session:regex}}$/ and '
         '(r._field == "longitudinal_g" or r._field == "lateral_g"))\n'
         '  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n'
         '  |> group(columns: ["car", "session"])\n'
         '  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
-        '  |> keep(columns: ["_time", "longitudinal_g", "lateral_g", "session"])'
+        '  |> keep(columns: ["_time", "longitudinal_g", "lateral_g", "car", "session"])'
     )
     return {
         "id": panel_id,
@@ -241,12 +256,13 @@ def gg_plot(panel_id, grid):
     }
 
 
-def live_can_status(panel_id, grid):
+def live_can_status(panel_id, grid, *, stream="real"):
     query = (
         'import "array"\n\n'
         'recent = from(bucket: "home")\n'
         '  |> range(start: -5s)\n'
-        '  |> filter(fn: (r) => r._measurement == "can_frame" and r._field == "seq")\n'
+        '  |> filter(fn: (r) => r._measurement == "can_frame" and '
+        f'r._field == "seq" and {_stream_condition(stream)})\n'
         '  |> group()\n'
         '  |> last()\n'
         '  |> map(fn: (r) => ({_time: now(), _measurement: "telemetry_status", '
@@ -300,7 +316,8 @@ def live_can_status(panel_id, grid):
     }
 
 
-def latest_table(panel_id, title, condition, grid, *, dbc=None, description=""):
+def latest_table(panel_id, title, condition, grid, *, dbc=None, description="",
+                 stream="real"):
     return {
         "id": panel_id,
         "title": title,
@@ -309,7 +326,8 @@ def latest_table(panel_id, title, condition, grid, *, dbc=None, description=""):
         "gridPos": grid,
         "datasource": DATASOURCE,
         "targets": [_target(
-            _signal_query(condition, dbc=dbc, latest=True, table=True), "table"
+            _signal_query(condition, dbc=dbc, latest=True, table=True,
+                          stream=stream), "table"
         )],
         "fieldConfig": {"defaults": {}, "overrides": []},
         "options": {"cellHeight": "sm", "showHeader": True},
@@ -378,7 +396,7 @@ def _dashboard(uid, title, description, panels, *, variables=None):
                 "title": "Telemetry tools",
                 "tooltip": "Start or end a supervised vehicle telemetry test",
                 "type": "link",
-                "url": "http://192.168.0.136:8080",
+                "url": "http://telemetrypi.local",
             }
         ],
     }
@@ -398,6 +416,32 @@ def _custom_variable(name, label, values, current):
         "hide": 0,
         "includeAll": False,
         "multi": False,
+        "skipUrlSync": False,
+    }
+
+
+def _session_variable(stream):
+    query = (
+        'import "influxdata/influxdb/schema"\n'
+        'schema.tagValues(bucket: "home", tag: "session", '
+        'predicate: (r) => r._measurement == "telemetry_derived" and '
+        f'{_stream_condition(stream)}, start: -24h)'
+    )
+    return {
+        "name": "test_session",
+        "label": "Test session",
+        "type": "query",
+        "datasource": DATASOURCE,
+        "query": query,
+        "definition": query,
+        "refresh": 1,
+        "includeAll": True,
+        "allValue": ".*",
+        "multi": False,
+        "sort": 2,
+        "options": [],
+        "current": {"selected": True, "text": "All", "value": "$__all"},
+        "hide": 0,
         "skipUrlSync": False,
     }
 
@@ -695,54 +739,85 @@ def bms_dashboard():
     )
 
 
-def analysis_dashboard():
+def _analysis_panels(stream):
     panels = [
-        live_can_status(1, {"x": 0, "y": 0, "w": 24, "h": 3}),
+        live_can_status(1, {"x": 0, "y": 0, "w": 24, "h": 3}, stream=stream),
         derived_stat(2, "Distance this test", "Distance_m",
-                     {"x": 0, "y": 3, "w": 4, "h": 4}, unit="lengthm", decimals=1),
+                     {"x": 0, "y": 3, "w": 4, "h": 4}, unit="lengthm", decimals=1,
+                     stream=stream),
         derived_stat(3, "Energy used", "Energy_Used_Wh",
                      {"x": 4, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1,
-                     description="Integrated discharge energy for the current test session."),
+                     description="Integrated discharge energy for the current test session.",
+                     stream=stream),
         derived_stat(4, "Energy charged", "Energy_Charged_Wh",
                      {"x": 8, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1,
-                     description="Working convention: positive HVC pack current is charging."),
+                     description="Working convention: positive HVC pack current is charging.",
+                     stream=stream),
         derived_stat(5, "Net energy change", "Net_Energy_Change_Wh",
-                     {"x": 12, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1),
+                     {"x": 12, "y": 3, "w": 4, "h": 4}, unit="watth", decimals=1,
+                     stream=stream),
         derived_stat(6, "Pack power", "Pack_Power_W",
                      {"x": 16, "y": 3, "w": 4, "h": 4}, unit="watt", decimals=0,
-                     description="Positive is charging; negative is discharging."),
+                     description="Positive is charging; negative is discharging.",
+                     stream=stream),
         derived_stat(7, "IMU alignment valid", "IMU_Alignment_Valid",
                      {"x": 20, "y": 3, "w": 4, "h": 4}, decimals=0,
-                     description="GG data is suppressed unless this is 1."),
+                     description="GG data is suppressed unless this is 1.", stream=stream),
         derived_timeseries(
             8, "Vehicle speed", ["Vehicle_Speed_mps"],
             {"x": 0, "y": 7, "w": 12, "h": 8}, unit="velocityms",
-            description="VCU speed converted from mph to m/s using source timestamps."),
+            description="VCU speed converted from mph to m/s using source timestamps.",
+            stream=stream),
         derived_timeseries(
             9, "Acceleration from vehicle speed", ["Vehicle_Accel_From_Speed_mps2"],
             {"x": 12, "y": 7, "w": 12, "h": 8}, unit="accMS2",
-            description="Smoothed local slope of speed; intended for engineering analysis."),
+            description="Smoothed local slope of speed; intended for engineering analysis.",
+            stream=stream),
         derived_timeseries(
             10, "Pack power", ["Pack_Power_W"],
             {"x": 0, "y": 15, "w": 12, "h": 8}, unit="watt",
-            description="Computed from the nearest voltage/current pair within 200 ms."),
+            description="Computed from the nearest voltage/current pair within 200 ms.",
+            stream=stream),
         derived_timeseries(
             11, "Session energy", ["Energy_Used_Wh", "Energy_Charged_Wh",
                                    "Net_Energy_Change_Wh"],
-            {"x": 12, "y": 15, "w": 12, "h": 8}, unit="watth"),
-        gg_plot(12, {"x": 0, "y": 23, "w": 12, "h": 10}),
+            {"x": 12, "y": 15, "w": 12, "h": 8}, unit="watth", stream=stream),
+        gg_plot(12, {"x": 0, "y": 23, "w": 12, "h": 10}, stream=stream),
         derived_timeseries(
             13, "Accumulator temperature rise rate",
             ["Accumulator_Temp_Rise_C_per_s"],
             {"x": 12, "y": 23, "w": 12, "h": 10}, unit="suffix:degC/s",
-            description="Rolling timestamp-based slope of HVC maximum accumulator temperature."),
-        transform_events(14, {"x": 0, "y": 33, "w": 24, "h": 8}),
+            description="Rolling timestamp-based slope of HVC maximum accumulator temperature.",
+            stream=stream),
+        transform_events(14, {"x": 0, "y": 33, "w": 24, "h": 8}, stream=stream),
     ]
+    return panels
+
+
+def analysis_dashboard():
     return _dashboard(
         "trevcan-live-analysis", "TREVCAN - Live Analysis",
-        "Session-aware derived telemetry calculated on the telemetry Pi from source timestamps.",
-        panels,
+        "Real-vehicle session-aware telemetry calculated from source timestamps. "
+        "Synthetic validation streams are excluded.",
+        _analysis_panels("real"), variables=[_session_variable("real")],
     )
+
+
+def synthetic_validation_dashboard():
+    panels = _analysis_panels("scenario")
+    panels.append(latest_table(
+        15, "Synthetic HVC fault bits",
+        'r.signal =~ /^HVC_Err_/ or r.signal == "HVC_BMS_State" or '
+        'r.signal == "HVC_BMB_Fault_Module" or r.signal == "HVC_BMB_Fault_State"',
+        {"x": 0, "y": 41, "w": 24, "h": 8}, dbc="hvc.dbc", stream="scenario",
+        description="Fault values generated by the synthetic hvc-faults or all scenario."))
+    dashboard = _dashboard(
+        "trevcan-synthetic-validation", "TREVCAN - Synthetic Validation",
+        "Isolated scenario-runner output. This dashboard never displays real-car streams.",
+        panels, variables=[_session_variable("scenario")],
+    )
+    dashboard["tags"].append("synthetic")
+    return dashboard
 
 
 def organized_dashboards():
@@ -750,6 +825,7 @@ def organized_dashboards():
     return [
         ("trevcan-overview.json", overview_dashboard()),
         ("trevcan-live-analysis.json", analysis_dashboard()),
+        ("trevcan-synthetic-validation.json", synthetic_validation_dashboard()),
         ("trevcan-bms.json", bms_dashboard()),
         ("trevcan-hvc.json", hvc_dashboard()),
         ("trevcan-inverter.json", inverter_dashboard()),

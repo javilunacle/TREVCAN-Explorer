@@ -184,6 +184,18 @@ systemctl --user status trevcan-telemetry-control.service --no-pager
 
 The control service remains disabled at boot even when `--start-now` is used.
 
+Install the friendly LAN address once:
+
+```bash
+bash telemetry/install_friendly_url_pi.sh
+```
+
+This sets the telemetry Pi hostname to `telemetrypi`, enables mDNS through
+Avahi, and installs a small Nginx reverse proxy. It does not change the
+telemetry data path. After the command completes, reconnecting SSH as
+`pi@telemetrypi.local` also works. The numeric addresses remain available as
+fallbacks if a viewer does not support `.local` name resolution.
+
 ## Running a vehicle test
 
 After any telemetry-Pi reboot, a software lead performs this single preparation
@@ -197,14 +209,19 @@ systemctl --user start trevcan-telemetry-control.service
 Then the test operator does not need SSH:
 
 1. Power the router, telemetry Pi, and car Pi.
-2. Open `http://192.168.0.136:8080`.
+2. Open `http://telemetrypi.local`. If `.local` resolution is unavailable on
+   that viewer, use `http://192.168.0.136:8080`.
 3. Select **Start Test**. This starts the receiver first, waits for TCP port
    8765, creates/reuses the current analysis session, and then starts the
    dual-bus car sender.
-4. Open Grafana at `http://192.168.0.136:3000`. All provisioned dashboards
-   include a **Telemetry tools** link back to TREVCAN Telemetry Tools. Use
+4. Select **Open Grafana dashboards** in Telemetry Tools, or open
+   `http://telemetrypi.local:3000/dashboards` directly. All provisioned
+   dashboards include a **Telemetry tools** link back to TREVCAN Telemetry
+   Tools. Use
    **TREVCAN - Live Analysis** for distance, power/energy, rate of temperature
-   change, transform diagnostics, and the alignment-gated GG plot.
+   change, transform diagnostics, and the alignment-gated GG plot. Normal
+   dashboards automatically exclude synthetic scenario streams. Use the
+   optional **Test session** selector only when reviewing an earlier run.
 5. Select **End Test - Stop Telemetry** when capture should stop. This cleanly
    stops and syncs only the telemetry sender. The car Pi and every other car
    service remain powered.
@@ -325,8 +342,10 @@ warnings are diagnostic engineering aids, not safety alarms or interlocks.
 Run synthetic scenarios on the **telemetry Pi**, with the real car test ended.
 They use a unique `scenario-*` car ID and the normal authenticated TCP receiver,
 DBC decoder, transform worker, InfluxDB, and Grafana path. They never open
-SocketCAN and never transmit onto `can0` or `can1`. Do not run them alongside a
-real test because the current dashboards do not yet filter by car ID.
+SocketCAN and never transmit onto `can0` or `can1`. Normal vehicle dashboards
+exclude their `scenario-*` stream IDs, while **TREVCAN - Synthetic Validation**
+shows only scenario output. The combined-draft CAN Explorer remains an
+engineering view that can include both.
 
 Start only the receiver, list the available scenarios, and run the full suite:
 
@@ -340,8 +359,9 @@ bash telemetry/run_scenario_pi.sh --scenario all
 The wrapper reads both tokens from `.env.telemetry`, uses a temporary durable
 spool, waits for every frame to be acknowledged, and verifies the expected
 InfluxDB output. Open **TREVCAN - Live Analysis** with **Last 5 minutes** selected
-to see the derived results and GG points. Open **TREVCAN - HVC** to see the
-synthetic HVC fault bits.
+to see only real-car derived results. Open **TREVCAN - Synthetic Validation**
+to see scenario calculations, GG points, diagnostic events, and synthetic HVC
+fault bits without mixing them into vehicle graphs.
 
 Focused examples:
 
