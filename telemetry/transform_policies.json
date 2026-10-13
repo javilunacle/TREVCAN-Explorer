@@ -23,6 +23,7 @@
     "speed_window_ms": 500,
     "temperature_window_ms": 5000
   },
+  "speed_deadband_mph": 0.1,
   "electrical_pair_max_age_ms": 200,
   "imu_alignment": {
     "accepted_status_values": [2, 3],

@@ -191,6 +191,10 @@ class TransformEngine:
             raise ValueError(f"transform policy missing: {', '.join(missing)}")
         if self.policy["current_positive_direction"] not in {"charge", "discharge"}:
             raise ValueError("current_positive_direction must be charge or discharge")
+        deadband = self.policy.get("speed_deadband_mph")
+        if (not isinstance(deadband, (int, float)) or isinstance(deadband, bool) or
+                not math.isfinite(deadband) or deadband < 0):
+            raise ValueError("speed_deadband_mph must be a finite non-negative number")
         for name in ("fast", "medium", "slow", "event"):
             if name not in self.policy["policies"]:
                 raise ValueError(f"transform policy missing policy {name}")
@@ -279,7 +283,11 @@ class TransformEngine:
 
     def _handle_speed(self, lines, state, frame, value, session_id):
         timestamp = frame["timestamp_ns"]
-        speed_mps = value * 0.44704
+        # Preserve the decoded source signal, but prevent a stationary one-LSB
+        # speed flicker from accumulating false distance or acceleration.
+        filtered_mph = (0.0 if abs(value) <= self.policy["speed_deadband_mph"]
+                        else value)
+        speed_mps = filtered_mph * 0.44704
         speed = state["speed"]
         previous_t, previous_v = speed["last_t"], speed["last_v"]
         if previous_t is not None and timestamp > previous_t:

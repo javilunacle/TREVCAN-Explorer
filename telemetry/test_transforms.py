@@ -66,6 +66,36 @@ class TransformEngineTests(unittest.TestCase):
         self.assertTrue(any("signal=Vehicle_Accel_From_Speed_mps2" in line
                             for line in plan.lines))
 
+    def test_stationary_speed_jitter_does_not_accumulate_distance_or_acceleration(self):
+        inputs = [
+            decoded(1, 1_000_000_000, "VCU.dbc", "VCU_Summary",
+                    {"VCU_Speed_MPH": 0.01}),
+            decoded(2, 1_100_000_000, "VCU.dbc", "VCU_Summary",
+                    {"VCU_Speed_MPH": 0.0}),
+            decoded(3, 1_200_000_000, "VCU.dbc", "VCU_Summary",
+                    {"VCU_Speed_MPH": 0.1}),
+        ]
+        plan = self.engine.prepare(inputs)
+        speed = self.only_state(plan)["speed"]
+        self.assertEqual(speed["distance_m"], 0.0)
+        self.assertEqual(speed["last_v"], 0.0)
+        speed_lines = [line for line in plan.lines
+                       if "signal=Vehicle_Speed_mps" in line]
+        acceleration_lines = [line for line in plan.lines
+                              if "signal=Vehicle_Accel_From_Speed_mps2" in line]
+        self.assertTrue(speed_lines)
+        self.assertTrue(all(" value=0.0," in line for line in speed_lines))
+        self.assertTrue(acceleration_lines)
+        self.assertTrue(all(" value=0.0," in line for line in acceleration_lines))
+
+    def test_speed_above_deadband_is_preserved(self):
+        plan = self.engine.prepare([
+            decoded(1, 1_000_000_000, "VCU.dbc", "VCU_Summary",
+                    {"VCU_Speed_MPH": 1.0}),
+        ])
+        speed = self.only_state(plan)["speed"]
+        self.assertAlmostEqual(speed["last_v"], 0.44704)
+
     def test_vehicle_speed_policy_matches_the_real_vcu_dbc_on_can1(self):
         dbc_path = DBC_DIRECTORY / "VCU.dbc"
         generated = next(

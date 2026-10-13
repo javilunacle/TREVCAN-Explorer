@@ -300,6 +300,9 @@ it adds no transform processing to the car Pi.
 The initial policy provides:
 
 - mph-to-m/s conversion, distance integration, and a rolling speed derivative;
+  decoded speeds at or below the configurable 0.1 mph stationary deadband are
+  treated as zero for these derived calculations while raw decoded speed is
+  preserved unchanged;
 - pack power plus charge/discharge amp-hours and energy totals;
 - maximum-accumulator-temperature slope and a diagnostic event for a 20 degC
   change within one second;
