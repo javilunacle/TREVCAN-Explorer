@@ -2,9 +2,9 @@
 
 The transform engine consumes decoded frames in source-timestamp order.  It
 calculates from every selected update, while rate-limiting only the points sent
-to InfluxDB.  ``prepare`` never mutates committed state: callers persist the
-returned state only after the matching Influx write succeeds, making retries
-deterministic.
+to InfluxDB. ``prepare`` never mutates committed state: callers apply the
+returned state only after the matching Influx write succeeds. The active
+receiver keeps this state in RAM; process restarts reset running totals.
 """
 
 from __future__ import annotations
@@ -110,8 +110,8 @@ class SessionRegistry:
             "ended_ns": None,
         }
         payload["sessions"].append(session)
-        # Influx retains 24 hours; retaining a small extra catalog window makes
-        # delayed spool replay map to the correct test without unbounded growth.
+        # Keep a small extra metadata window for historical session review;
+        # this catalog stores no captured CAN frames.
         cutoff = now_ns - 48 * 60 * 60 * 1_000_000_000
         payload["sessions"] = [
             item for item in payload["sessions"]
@@ -151,24 +151,16 @@ class TransformPlan:
     def line_protocol(self):
         return "\n".join(self.lines) + ("\n" if self.lines else "")
 
-    def persisted_states(self):
-        return [
-            (session_id, car_id, transform, json.dumps(state, separators=(",", ":")))
-            for (session_id, car_id, transform), state in self.states.items()
-        ]
-
-
 class TransformEngine:
     """Apply the initial TREVCAN live-analysis policy set."""
 
     STATE_NAME = "live-analysis-v1"
 
-    def __init__(self, policy_path, session_file=None, state_loader=None):
+    def __init__(self, policy_path, session_file=None):
         self.policy_path = Path(policy_path)
         self.policy = json.loads(self.policy_path.read_text(encoding="utf-8"))
         self._validate_policy()
         self.sessions = SessionRegistry(session_file)
-        self.state_loader = state_loader or (lambda *_: None)
         self._committed = {}
         self._signal_sources = {}
         self._message_sources = {}
@@ -222,8 +214,6 @@ class TransformEngine:
         key = (session_id, car_id, self.STATE_NAME)
         if key not in work:
             committed = self._committed.get(key)
-            if committed is None:
-                committed = self.state_loader(*key)
             if not isinstance(committed, dict) or committed.get("policy_version") != 1:
                 committed = self._new_state()
             work[key] = copy.deepcopy(committed)

@@ -7,6 +7,7 @@ if [[ "${EUID}" -eq 0 ]]; then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
 template="$script_dir/systemd/trevcan-telemetry-car.service.in"
 app_root="$HOME/.local/share/trevcan"
 package_dir="$app_root/telemetry"
@@ -51,8 +52,7 @@ fi
 python_bin="${TREVCAN_CAR_PYTHON:-}"
 for candidate in \
     "$python_bin" \
-    "$HOME/TREVCAN-Explorer/venv/bin/python" \
-    "$HOME/TREVCAN-Explorer/.venv/bin/python" \
+    "$repo_root/.venv/bin/python" \
     "$(command -v python3 || true)"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
         python_bin="$candidate"
@@ -83,9 +83,10 @@ if [[ ! "$token" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
     exit 1
 fi
 
-mkdir -p "$package_dir" "$config_dir" "$unit_dir" "$HOME/trevcan-data"
+mkdir -p "$package_dir" "$config_dir" "$unit_dir"
 install -m 0644 "$script_dir/__init__.py" "$package_dir/__init__.py"
 install -m 0644 "$script_dir/common.py" "$package_dir/common.py"
+install -m 0644 "$script_dir/buffers.py" "$package_dir/buffers.py"
 install -m 0644 "$script_dir/car.py" "$package_dir/car.py"
 
 temporary_env="$(mktemp)"
@@ -95,7 +96,6 @@ trap 'rm -f "$temporary_env" "$temporary_unit"' EXIT
     printf 'TELEMETRY_TOKEN=%s\n' "$token"
     printf 'TELEMETRY_SERVER_HOST=%s\n' "$server_host"
     printf 'TELEMETRY_SERVER_PORT=8765\n'
-    printf 'TELEMETRY_CAR_DB=%s/trevcan-data/car-spool.sqlite3\n' "$HOME"
 } > "$temporary_env"
 install -m 0600 "$temporary_env" "$config_path"
 
@@ -123,6 +123,6 @@ else
 fi
 
 echo "Car sender service installed."
-echo "Spool:  $HOME/trevcan-data/car-spool.sqlite3"
+echo "Buffer: bounded RAM only; disconnected data is discarded."
 echo "Status: systemctl --user status trevcan-telemetry-car.service"
 echo "Logs:   journalctl --user -u trevcan-telemetry-car.service -f"

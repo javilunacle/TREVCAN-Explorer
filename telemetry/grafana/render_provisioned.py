@@ -1,17 +1,21 @@
-"""Render importable dashboard drafts for file provisioning on the telemetry Pi."""
+"""Render telemetry dashboards for file provisioning on the telemetry Pi."""
 
 import json
+import sys
 from pathlib import Path
 
 try:
     from .dashboard_specs import organized_dashboards
+    from .live_dashboard import live_dashboard
 except ImportError:  # Direct script execution on the telemetry Pi.
-    from dashboard_specs import organized_dashboards
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from telemetry.grafana.dashboard_specs import organized_dashboards
+    from telemetry.grafana.live_dashboard import live_dashboard
 
 
 DIRECTORY = Path(__file__).resolve().parent
 SOURCE_FILES = (
-    DIRECTORY / "trevcan-can-explorer.draft.json",
+    DIRECTORY / "trevcan-history-frames.json",
 )
 OUTPUT_DIRECTORY = DIRECTORY / "generated"
 
@@ -36,11 +40,17 @@ def render():
     written = []
     for source in SOURCE_FILES:
         dashboard = replace_datasource(json.loads(source.read_text(encoding="utf-8")))
-        destination = OUTPUT_DIRECTORY / source.name.replace(".draft", "")
+        destination = OUTPUT_DIRECTORY / source.name
         destination.write_text(json.dumps(dashboard, indent=2) + "\n", encoding="utf-8")
         destination.chmod(0o644)
         written.append(destination)
+    dashboards = [("trevcan-live-telemetry.json", live_dashboard())]
     for filename, dashboard in organized_dashboards():
+        dashboard["title"] = dashboard["title"].replace("Live Analysis", "Analysis").replace(
+            "TREVCAN - ", "TREVCAN - Historical ")
+        dashboard["tags"].append("historical")
+        dashboards.append((filename, dashboard))
+    for filename, dashboard in dashboards:
         destination = OUTPUT_DIRECTORY / filename
         destination.write_text(json.dumps(dashboard, indent=2) + "\n", encoding="utf-8")
         destination.chmod(0o644)

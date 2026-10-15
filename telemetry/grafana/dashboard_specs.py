@@ -1,7 +1,6 @@
 """Readable, read-only Grafana dashboards for the off-car telemetry stack.
 
-The React application combines monitoring with commands and configuration.
-These dashboards intentionally reproduce only its monitoring views. They use
+These dashboards provide historical monitoring views. They use
 the bus-specific DBC routing configured by ``telemetry/start_server_pi.sh``.
 """
 
@@ -549,7 +548,7 @@ def inverter_dashboard():
     ]
     return _dashboard(
         "trevcan-inverter", "TREVCAN - Inverter",
-        "Read-only replacement for the monitoring portion of the React inverter dashboard.",
+        "Historical inverter telemetry recorded from decoded CAN signals.",
         panels,
     )
 

@@ -1,206 +1,32 @@
-"""Pi multi-bus capture, batched durable SQLite spool, and TCP sender."""
+"""Pi multi-bus capture with small RAM batches and fresh-data reconnects."""
 
 import argparse
 import asyncio
 import json
 import math
 import os
-import sqlite3
 import time
-import uuid
-from pathlib import Path
 
 from .common import validate_frame, wire_line
+from .buffers import CarBuffer
 
 
-class SpoolLock:
-    """Prevent two sender processes from mutating the same sequence spool."""
-
-    def __init__(self, path):
-        self.path = f"{path}.lock"
-        self.file = open(self.path, "a+b")
-        try:
-            if os.name == "nt":
-                import msvcrt
-                if self.file.seek(0, os.SEEK_END) == 0:
-                    self.file.write(b"\0")
-                    self.file.flush()
-                self.file.seek(0)
-                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (OSError, BlockingIOError) as exc:
-            self.file.close()
-            raise RuntimeError(f"spool is already in use: {path}") from exc
-
-    def close(self):
-        if self.file.closed:
-            return
-        if os.name == "nt":
-            import msvcrt
-            self.file.seek(0)
-            msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
-        self.file.close()
-
-
-class CarSpool:
-    def __init__(self, path, car_id=None):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.lock = SpoolLock(path)
-        try:
-            self.db = sqlite3.connect(path)
-        except BaseException:
-            self.lock.close()
-            raise
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        self.db.execute("""CREATE TABLE IF NOT EXISTS frames (
-            seq INTEGER PRIMARY KEY, timestamp_ns INTEGER NOT NULL,
-            can_id INTEGER NOT NULL, is_extended INTEGER NOT NULL,
-            is_remote INTEGER NOT NULL, is_fd INTEGER NOT NULL, is_error INTEGER NOT NULL,
-            dlc INTEGER NOT NULL, data BLOB NOT NULL,
-            bus TEXT NOT NULL DEFAULT 'can0')""")
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(frames)")}
-        if "bus" not in columns:
-            self.db.execute("ALTER TABLE frames ADD COLUMN bus TEXT NOT NULL DEFAULT 'can0'")
-        self.db.commit()
-        stored = self._meta("car_id")
-        if stored and car_id and stored != car_id:
-            raise ValueError("car_id differs from existing spool identity")
-        self.car_id = stored or car_id or str(uuid.uuid4())
-        if not stored:
-            with self.db:
-                self._set_meta("car_id", self.car_id)
-                self._set_meta("next_seq", "1")
-                self._set_meta("last_timestamp_ns", "0")
-                self._set_meta("last_acked", "0")
-
-    def _meta(self, key):
-        row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-        return row[0] if row else None
-
-    def _set_meta(self, key, value):
-        self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (key, str(value)))
-
-    def append_many(self, records):
-        """Durably append a capture batch in one SQLite transaction."""
-        if not records:
-            return []
-        rows = []
-        with self.db:
-            next_seq = int(self._meta("next_seq"))
-            last_timestamp_ns = int(self._meta("last_timestamp_ns"))
-            for record in records:
-                (bus, can_id, data, is_extended, is_remote, is_fd, is_error,
-                 dlc, timestamp_ns) = record
-                data = bytes(data)
-                dlc = len(data) if dlc is None else dlc
-                candidate = {"type": "frame", "car_id": self.car_id, "seq": next_seq,
-                             "timestamp_ns": max(timestamp_ns or time.time_ns(), last_timestamp_ns + 1),
-                             "bus": bus, "can_id": can_id,
-                             "is_extended": bool(is_extended), "is_remote": bool(is_remote),
-                             "is_fd": bool(is_fd), "is_error": bool(is_error),
-                             "dlc": dlc, "data": data.hex()}
-                validate_frame(candidate)
-                last_timestamp_ns = candidate["timestamp_ns"]
-                rows.append((next_seq, last_timestamp_ns, can_id, int(is_extended),
-                             int(is_remote), int(is_fd), int(is_error), dlc, data, bus))
-                next_seq += 1
-            self.db.executemany("""INSERT INTO frames
-                (seq,timestamp_ns,can_id,is_extended,is_remote,is_fd,is_error,dlc,data,bus)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""", rows)
-            self._set_meta("next_seq", next_seq)
-            self._set_meta("last_timestamp_ns", last_timestamp_ns)
-        return [row[0] for row in rows]
-
-    def append(self, can_id, data, *, bus="can0", is_extended=False, is_remote=False,
-               is_fd=False, is_error=False, dlc=None, timestamp_ns=None):
-        return self.append_many([(bus, can_id, data, is_extended, is_remote, is_fd,
-                                  is_error, dlc, timestamp_ns)])[0]
-
-    def pending(self, limit=64):
-        rows = self.db.execute("""SELECT seq,timestamp_ns,can_id,is_extended,is_remote,
-            is_fd,is_error,dlc,data,bus FROM frames ORDER BY seq LIMIT ?""", (limit,)).fetchall()
-        return [{"type": "frame", "car_id": self.car_id, "seq": seq, "bus": bus,
-                 "timestamp_ns": timestamp_ns, "can_id": can_id,
-                 "is_extended": bool(is_extended), "is_remote": bool(is_remote),
-                 "is_fd": bool(is_fd), "is_error": bool(is_error),
-                 "dlc": dlc, "data": data.hex().upper()}
-                for seq, timestamp_ns, can_id, is_extended, is_remote, is_fd,
-                    is_error, dlc, data, bus in rows]
-
-    def oldest(self):
-        rows = self.pending(1)
-        return rows[0] if rows else None
-
-    def acknowledge_through(self, seq):
-        bounds = self.db.execute("SELECT MIN(seq),MAX(seq) FROM frames").fetchone()
-        if bounds[0] is None:
-            if seq <= int(self._meta("last_acked")):
-                return
-            raise ValueError("ACK exceeds the local spool")
-        if not bounds[0] <= seq <= bounds[1]:
-            raise ValueError("ACK is outside the pending spool range")
-        with self.db:
-            self.db.execute("DELETE FROM frames WHERE seq<=?", (seq,))
-            self._set_meta("last_acked", seq)
-
-    def acknowledge(self, seq):
-        oldest = self.oldest()
-        if oldest is None or oldest["seq"] != seq:
-            raise ValueError("ACK does not match oldest unacknowledged frame")
-        self.acknowledge_through(seq)
-
-    def status(self):
-        return {"car_id": self.car_id, "queued": self.db.execute("SELECT COUNT(*) FROM frames").fetchone()[0],
-                "last_acked": int(self._meta("last_acked")), "next_seq": int(self._meta("next_seq"))}
-
-    def close(self):
-        try:
-            self.db.close()
-        finally:
-            self.lock.close()
-
-
-def read_spool_status(path):
-    """Read live spool counters without taking the single-writer lock."""
-    resolved = Path(path).resolve().as_posix()
-    db = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
-    try:
-        meta = dict(db.execute("SELECT key,value FROM meta"))
-        columns = {row[1] for row in db.execute("PRAGMA table_info(frames)")}
-        buses = (dict(db.execute("SELECT bus,COUNT(*) FROM frames GROUP BY bus"))
-                 if "bus" in columns else {"legacy": db.execute(
-                     "SELECT COUNT(*) FROM frames").fetchone()[0]})
-        return {"car_id": meta["car_id"],
-                "queued": sum(buses.values()),
-                "queued_by_bus": buses,
-                "last_acked": int(meta["last_acked"]),
-                "next_seq": int(meta["next_seq"])}
-    finally:
-        db.close()
-
-
-async def send_forever(spool, host, port, token=None, stop=None, window_size=64):
-    """Retain rows until a cumulative post-commit ACK covers them."""
+async def send_forever(buffer, host, port, token=None, stop=None, window_size=64):
+    """Send small batches; a RAM sender discards disconnected data."""
     stop = stop or asyncio.Event()
     retry_delay = 1
     last_error_print = float("-inf")
     while not stop.is_set():
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), 5)
+            buffer.set_connected(True)
             announced_connected = False
             try:
                 while not stop.is_set():
-                    batch = spool.pending(window_size)
+                    batch = buffer.pending(window_size)
                     if not batch:
                         try:
-                            await asyncio.wait_for(stop.wait(), 0.1)
+                            await asyncio.wait_for(stop.wait(), 0.02)
                         except asyncio.TimeoutError:
                             pass
                         continue
@@ -208,8 +34,8 @@ async def send_forever(spool, host, port, token=None, stop=None, window_size=64)
                     if token:
                         message["token"] = token
                     writer.write(wire_line(message))
-                    await writer.drain()
-                    raw = await asyncio.wait_for(reader.readline(), 10)
+                    await asyncio.wait_for(writer.drain(), 2)
+                    raw = await asyncio.wait_for(reader.readline(), 2)
                     if not raw:
                         raise ConnectionError("receiver disconnected")
                     reply = json.loads(raw)
@@ -217,17 +43,22 @@ async def send_forever(spool, host, port, token=None, stop=None, window_size=64)
                         raise ValueError(f"receiver rejected batch: {reply.get('error')}")
                     if reply.get("type") != "ack" or reply.get("seq") != batch[-1]["seq"]:
                         raise ValueError("unexpected cumulative ACK")
-                    spool.acknowledge_through(reply["seq"])
+                    buffer.acknowledge_through(reply["seq"])
                     if not announced_connected:
                         print(f"[sender] connected to {host}:{port}", flush=True)
                         announced_connected = True
                     retry_delay = 1
                     last_error_print = float("-inf")
             finally:
+                buffer.set_connected(False)
                 writer.close()
-                await writer.wait_closed()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), 1)
+                except (OSError, asyncio.TimeoutError):
+                    pass
         except (OSError, asyncio.TimeoutError, ConnectionError,
                 json.JSONDecodeError, ValueError) as exc:
+            buffer.set_connected(False)
             now = asyncio.get_running_loop().time()
             if now - last_error_print >= 30:
                 print(f"[sender] disconnected: {exc}; retrying in {retry_delay}s", flush=True)
@@ -236,11 +67,10 @@ async def send_forever(spool, host, port, token=None, stop=None, window_size=64)
                 await asyncio.wait_for(stop.wait(), retry_delay)
             except asyncio.TimeoutError:
                 pass
-            retry_delay = min(retry_delay * 2, 10)
 
 
 def load_simulation_frames(path):
-    """Validate a raw-frame replay file before anything is placed in the spool."""
+    """Validate a raw-frame replay file before anything is placed in the buffer."""
     frames = []
     with open(path, encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
@@ -299,7 +129,7 @@ async def capture_forever(queue, *, interface=None, simulate_rate=None,
                                      msg.dlc, time.time_ns()))
 
 
-async def spool_writer(spool, queue, batch_size=256, flush_ms=20, status_interval=5):
+async def capture_writer(buffer, queue, batch_size=256, flush_ms=20, status_interval=5):
     last_status = asyncio.get_running_loop().time()
     while True:
         records = [await queue.get()]
@@ -312,18 +142,18 @@ async def spool_writer(spool, queue, batch_size=256, flush_ms=20, status_interva
                 records.append(await asyncio.wait_for(queue.get(), remaining))
             except asyncio.TimeoutError:
                 break
-        sequences = spool.append_many(records)
+        buffer.append_many(records)
         for _ in records:
             queue.task_done()
         now = asyncio.get_running_loop().time()
         if now - last_status >= status_interval:
-            print(f"[spool] {spool.status()}", flush=True)
+            print(f"[car-buffer] {buffer.status()}", flush=True)
             last_status = now
 
 
 async def run(args):
-    spool = CarSpool(args.db, args.car_id)
-    print(f"[car] {spool.status()}", flush=True)
+    buffer = CarBuffer(args.car_id)
+    print(f"[car] {buffer.status()}", flush=True)
     queue = asyncio.Queue(maxsize=args.queue_size)
     try:
         async with asyncio.TaskGroup() as group:
@@ -333,23 +163,21 @@ async def run(args):
                                                   simulate_rate=args.simulate_rate,
                                                   simulate_file=args.simulate_file,
                                                   replay_rate=args.replay_rate))
-            group.create_task(spool_writer(spool, queue, args.spool_batch_size,
-                                           args.spool_flush_ms, args.status_interval))
-            group.create_task(send_forever(spool, args.host, args.port, args.token,
+            group.create_task(capture_writer(buffer, queue, args.batch_size,
+                                           args.flush_ms, args.status_interval))
+            group.create_task(send_forever(buffer, args.host, args.port, args.token,
                                            window_size=args.window_size))
     finally:
-        spool.close()
+        buffer.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pi raw-CAN capture and durable sender")
-    parser.add_argument("--db", default="telemetry-car.sqlite3")
-    parser.add_argument("--host", default="127.0.0.1", help="laptop receiver IP")
+    parser = argparse.ArgumentParser(description="Pi raw-CAN capture and RAM-batched sender")
+    parser.add_argument("--host", default="127.0.0.1", help="telemetry receiver host")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--token", default=os.getenv("TELEMETRY_TOKEN"),
                         help="shared demo token (or TELEMETRY_TOKEN environment variable)")
-    parser.add_argument("--car-id", help="stable identity; saved on first start")
-    parser.add_argument("--status", action="store_true", help="print local spool status and exit")
+    parser.add_argument("--car-id", help="optional identity prefix; each process adds a unique suffix")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--interface", action="append",
                         help="SocketCAN interface; repeat for can0 and can1")
@@ -360,23 +188,17 @@ def main():
     parser.add_argument("--queue-size", type=int, default=1000)
     parser.add_argument("--window-size", type=int, default=256,
                         help="maximum frames in one TCP transaction (default: 256)")
-    parser.add_argument("--spool-batch-size", type=int, default=256,
-                        help="maximum frames in one car SQLite transaction")
-    parser.add_argument("--spool-flush-ms", type=float, default=20,
-                        help="maximum capture time held before a spool commit")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="maximum frames in one RAM capture batch")
+    parser.add_argument("--flush-ms", type=float, default=20,
+                        help="maximum capture batching delay")
     parser.add_argument("--status-interval", type=float, default=5,
-                        help="seconds between spool status log lines (default: 5)")
+                        help="seconds between buffer status log lines (default: 5)")
     args = parser.parse_args()
-    if args.status:
-        try:
-            print(json.dumps(read_spool_status(args.db), indent=2))
-        except (OSError, sqlite3.Error, KeyError, ValueError) as exc:
-            parser.error(f"cannot read spool status: {exc}")
-        return
     if args.interface is None and args.simulate_rate is None and args.simulate_file is None:
         parser.error("provide --interface, --simulate-rate, or --simulate-file")
-    if (args.queue_size < 1 or args.window_size < 1 or args.spool_batch_size < 1 or
-            args.spool_flush_ms <= 0 or args.status_interval <= 0 or
+    if (args.queue_size < 1 or args.window_size < 1 or args.batch_size < 1 or
+            args.flush_ms <= 0 or args.status_interval <= 0 or
             args.replay_rate <= 0 or
             (args.simulate_rate is not None and args.simulate_rate <= 0)):
         parser.error("queue, batch, window, flush, and simulation values must be positive")

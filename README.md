@@ -1,84 +1,57 @@
-TREVCAN-Explorer
-================
+# TREVCAN Telemetry
 
-Simple CAN explorer with a FastAPI backend and React frontend.
+Vehicle telemetry from the car Pi to a telemetry Pi, with Grafana Live for
+current samples and InfluxDB for historical analysis.
 
-It can be used as a general purpose replacement for PCAN-Explorer in addition
-to a TREV specific menus and pages. 
+```text
+Car Pi: can0/can1 -> small RAM batches -> authenticated TCP
+                                             |
+Telemetry Pi: decode DBC signals -------------+
+                 |                           |
+                 v                           v
+            Grafana Live              InfluxDB history
+```
 
-Quick start
------------
-1. Install Python deps:
-	```
-	pip install -r requirements.txt
-	```
-2. Install frontend deps:
-	```
-	cd webserver/frontend
-	npm install
-	cd ../..
-	```
-3. Start everything:
-	```
-	python start.py
-	```
+Disconnected data is discarded. Both Pis use bounded RAM buffers and resume
+with fresh samples after reconnecting. Running distance and energy totals reset
+when the receiver restarts. This is a passive monitoring pipeline.
 
-Run on boot with systemd (Linux)
----------------------------------
-The repository includes a systemd installer that creates a service for the
-current checkout and enables it at boot:
+Setup and test-day operation are documented in [telemetry/README.md](telemetry/README.md).
 
-- `trevcan-explorer.service` starts the TREVCAN backend/frontend stack.
+## Repository layout
 
-CAN interface setup is not managed by this service. Configure and bring up CAN
-interfaces separately before connecting from the app.
+- `telemetry/car.py`: multi-bus SocketCAN capture and sender.
+- `telemetry/server.py`: receiver, DBC decoding, and historical export.
+- `telemetry/live.py`: independent Grafana Live publisher.
+- `telemetry/buffers.py`: bounded RAM queues.
+- `telemetry/dbc_files/`: CAN message definitions.
+- `telemetry/transforms.py` and `transform_policies.json`: timestamp-based calculations.
+- `telemetry/control.py`: supervised test start/stop page.
+- `telemetry/grafana/`: streaming and historical dashboards.
+- `telemetry/scenario_runner.py` and `simulate.py`: synthetic validation tools.
+- `docker-compose.telemetry-pi.yml`: Grafana and InfluxDB deployment.
 
-1. Install Python dependencies. A repo-local virtual environment is recommended
-   on Raspberry Pi OS and will be used automatically by the service installer:
-	```
-	python3 -m venv .venv
-	. .venv/bin/activate
-	pip install -r requirements.txt
-	```
-2. Install the service:
-	```
-	bash systemd/install_service.sh
-	```
-3. Check status:
-	```
-	sudo systemctl status trevcan-explorer.service
-	```
-4. View logs:
-	```
-	sudo journalctl -u trevcan-explorer.service -f
-	```
+## Python environment
 
-If you need a different Python interpreter, run the installer with
-`PYTHON_BIN=/path/to/python bash systemd/install_service.sh`.
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
 
-The service runs the selected Python interpreter with `start.py --service`,
-which keeps the backend and frontend running without trying to open a browser
-during boot.
+Configure `.env.telemetry` from [.env.telemetry.example](.env.telemetry.example),
+then follow the runbook to provision Grafana and install the Pi services.
+Installers leave boot startup disabled by default.
 
-On Linux, CAN interfaces already brought up by the system will appear to the app
-as SocketCAN devices. Use the SocketCAN/CANable path in the UI and select the
-interface you want to use.
+## Local validation
 
-Open:
-- Frontend: http://localhost:3001
-- Backend API: http://localhost:8000
+No CAN adapter, Grafana, or InfluxDB instance is needed for the tests:
 
-Supported CAN hardware / servers
---------------------------------
-- PCAN-USB
-- CANable
-- Network CAN server (`host:port`)
-- Bluetooth CAN server (Windows)
+```bash
+python -m unittest discover -s telemetry -t .
+python -m telemetry.grafana.render_provisioned
+python -m telemetry.scenario_runner --list
+```
 
-Reliable raw-CAN transport prototype
-------------------------------------
-For the separate Pi-to-laptop SQLite spool, sequenced TCP receiver, off-car DBC
-decoding, and InfluxDB/Grafana simulation walkthrough, see
-[`telemetry/README.md`](telemetry/README.md). This does not replace the React
-explorer or change the existing (lossy) `StreamForwarder` path.
+See [the Grafana guide](telemetry/grafana/README.md) for channels, dashboards,
+and the historical data model.
 

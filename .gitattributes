@@ -1,0 +1,2 @@
+# Preserve CAN definitions byte-for-byte across Windows and Linux checkouts.
+telemetry/dbc_files/*.dbc -text

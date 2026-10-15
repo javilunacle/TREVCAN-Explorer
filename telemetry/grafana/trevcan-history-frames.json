@@ -19,11 +19,11 @@
   ],
   "id": null,
   "uid": "trevcan-explorer-combined-draft",
-  "title": "TREVCAN CAN Explorer (combined draft)",
-  "description": "Read-only raw frame list and decoded signals from the reliable telemetry pipeline.",
+  "title": "TREVCAN - Historical CAN Frames",
+  "description": "Recorded raw CAN frames and decoded signals from the telemetry pipeline.",
   "tags": [
     "trevcan",
-    "draft",
+    "historical",
     "read-only"
   ],
   "timezone": "browser",
@@ -34,7 +34,7 @@
       "id": 1,
       "title": "CAN messages: latest value per CAN ID",
       "type": "table",
-      "description": "One current row per car, CAN bus, and CAN ID. A table-ready receiver snapshot avoids the expensive multi-field Flux pivot and keeps one-second refreshes lightweight.",
+      "description": "One recent row per car, CAN bus, and CAN ID from InfluxDB. A preformatted table field avoids an expensive multi-field Flux pivot.",
       "gridPos": {
         "x": 0,
         "y": 0,

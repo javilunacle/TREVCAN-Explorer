@@ -1,13 +1,13 @@
 """Deterministic tests for timestamp-based live telemetry transforms."""
 
 import asyncio
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from .server import DBCDecoder, RawStore, export_forever
+from .buffers import RawBuffer
+from .server import DBCDecoder, export_forever
 from .simulate import DBC_DIRECTORY, generate_frames
 from .transforms import SessionRegistry, TransformEngine
 
@@ -182,25 +182,17 @@ class TransformEngineTests(unittest.TestCase):
         self.assertEqual(first.lines, retry.lines)
         self.assertEqual(first.states, retry.states)
 
-    def test_transform_state_round_trips_through_receiver_database(self):
-        database = Path(self.temporary.name) / "receiver.sqlite3"
-        store = RawStore(database)
-        try:
-            plan = self.engine.prepare([
-                decoded(1, 1_000_000_000, "VCU.dbc", "VCU_Summary",
-                        {"VCU_Speed_MPH": 10.0})])
-            frame = plan.states and decoded(
-                1, 1_000_000_000, "VCU.dbc", "VCU_Summary",
-                {"VCU_Speed_MPH": 10.0})[0]
-            frame["data"] = "0000000000000000"
-            store.commit_frame(frame)
-            store.finish_export(store.pending(), plan.persisted_states())
-            key = next(iter(plan.states))
-            self.assertEqual(store.load_transform_state(*key), plan.states[key])
-            self.assertEqual(store.status()["pending_influx"], 0)
-            self.assertIsInstance(json.loads(plan.persisted_states()[0][3]), dict)
-        finally:
-            store.close()
+    def test_receiver_restart_resets_running_totals(self):
+        self.engine.commit(self.engine.prepare([
+            decoded(1, 1_000_000_000, "VCU.dbc", "VCU_Summary", {"VCU_Speed_MPH": 10}),
+            decoded(2, 1_100_000_000, "VCU.dbc", "VCU_Summary", {"VCU_Speed_MPH": 10}),
+        ]))
+        update = decoded(3, 1_200_000_000, "VCU.dbc", "VCU_Summary", {"VCU_Speed_MPH": 10})
+        continued = self.only_state(self.engine.prepare([update]))["speed"]["distance_m"]
+        restarted = TransformEngine(POLICY, self.sessions)
+        fresh = self.only_state(restarted.prepare([update]))["speed"]["distance_m"]
+        self.assertGreater(continued, 0)
+        self.assertEqual(fresh, 0)
 
 
 class _SpeedDecoder:
@@ -209,62 +201,63 @@ class _SpeedDecoder:
 
 
 class TransformExportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_export_checkpoints_transform_only_after_influx_accepts_batch(self):
+    async def test_successful_history_write_advances_running_totals(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            sessions = root / "sessions.json"
-            session = SessionRegistry(sessions).start(now_ns=1_000_000_000)
-            store = RawStore(root / "receiver.sqlite3")
-            frame = decoded(
-                1, 1_100_000_000, "VCU.dbc", "VCU_Summary",
-                {"VCU_Speed_MPH": 1.0})[0]
-            frame["data"] = "0000000000000000"
-            store.commit_frame(frame)
-            engine = TransformEngine(POLICY, sessions, store.load_transform_state)
+            sessions = Path(directory) / "sessions.json"
+            SessionRegistry(sessions).start(now_ns=1_000_000_000)
+            store = RawBuffer()
+            item = decoded(1, 1_100_000_000, "VCU.dbc", "VCU_Summary",
+                           {"VCU_Speed_MPH": 1.0})[0]
+            item["data"] = "0000000000000000"
+            store.commit_frame(item)
+            engine = TransformEngine(POLICY, sessions)
             stop = asyncio.Event()
 
             with patch("telemetry.server.post_influx"):
                 task = asyncio.create_task(export_forever(
                     store, _SpeedDecoder(), "http://unused", "token", stop,
                     interval_seconds=0.001, transformer=engine))
-                for _ in range(100):
-                    if store.status()["pending_influx"] == 0:
-                        break
-                    await asyncio.sleep(0.01)
-                stop.set()
-                await task
+                try:
+                    async def exported():
+                        while store.status()["pending_influx"]:
+                            await asyncio.sleep(0.005)
+                    await asyncio.wait_for(exported(), 2)
+                finally:
+                    stop.set()
+                    await task
+            probe = engine.prepare([decoded(
+                2, 1_200_000_000, "VCU.dbc", "VCU_Summary", {"VCU_Speed_MPH": 2.0})])
+            distance = next(iter(probe.states.values()))["speed"]["distance_m"]
+            self.assertAlmostEqual(distance, 0.067056)
 
-            key = (session["id"], "car-1", engine.STATE_NAME)
-            self.assertEqual(store.status()["pending_influx"], 0)
-            self.assertIsNotNone(store.load_transform_state(*key))
-            store.close()
-
-    async def test_failed_influx_write_retains_raw_and_does_not_advance_state(self):
+    async def test_failed_history_write_discards_raw_and_does_not_advance_totals(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            sessions = root / "sessions.json"
-            session = SessionRegistry(sessions).start(now_ns=1_000_000_000)
-            store = RawStore(root / "receiver.sqlite3")
-            frame = decoded(
-                1, 1_100_000_000, "VCU.dbc", "VCU_Summary",
-                {"VCU_Speed_MPH": 1.0})[0]
-            frame["data"] = "0000000000000000"
-            store.commit_frame(frame)
-            engine = TransformEngine(POLICY, sessions, store.load_transform_state)
+            sessions = Path(directory) / "sessions.json"
+            SessionRegistry(sessions).start(now_ns=1_000_000_000)
+            store = RawBuffer()
+            item = decoded(1, 1_100_000_000, "VCU.dbc", "VCU_Summary",
+                           {"VCU_Speed_MPH": 1.0})[0]
+            item["data"] = "0000000000000000"
+            store.commit_frame(item)
+            engine = TransformEngine(POLICY, sessions)
             stop = asyncio.Event()
 
-            with patch("telemetry.server.post_influx", side_effect=RuntimeError("offline")):
+            with patch("telemetry.server.post_influx", side_effect=RuntimeError("offline")) as post:
                 task = asyncio.create_task(export_forever(
                     store, _SpeedDecoder(), "http://unused", "token", stop,
                     interval_seconds=0.001, transformer=engine))
-                await asyncio.sleep(0.03)
-                stop.set()
-                await task
-
-            key = (session["id"], "car-1", engine.STATE_NAME)
-            self.assertEqual(store.status()["pending_influx"], 1)
-            self.assertIsNone(store.load_transform_state(*key))
-            store.close()
+                try:
+                    async def failed():
+                        while not post.call_count or store.status()["pending_influx"]:
+                            await asyncio.sleep(0.005)
+                    await asyncio.wait_for(failed(), 2)
+                finally:
+                    stop.set()
+                    await task
+            self.assertEqual(store.status()["dropped"], 1)
+            probe = engine.prepare([decoded(
+                2, 1_200_000_000, "VCU.dbc", "VCU_Summary", {"VCU_Speed_MPH": 2.0})])
+            self.assertEqual(next(iter(probe.states.values()))["speed"]["distance_m"], 0)
 
 
 if __name__ == "__main__":

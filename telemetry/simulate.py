@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 
-DBC_DIRECTORY = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files"
+DBC_DIRECTORY = Path(__file__).with_name("dbc_files")
 DEFAULT_DBC_FILES = (
     "BMS-Firmware-RTOS-Complete.dbc",
     "hvc.dbc",

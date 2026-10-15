@@ -14,7 +14,7 @@ from telemetry.grafana import render_provisioned
 class GrafanaDashboardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        dbc_directory = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files"
+        dbc_directory = Path(__file__).with_name("dbc_files")
         databases = [
             cantools.database.load_file(path, strict=False)
             for path in dbc_directory.glob("*.dbc")
@@ -198,7 +198,7 @@ class GrafanaDashboardTests(unittest.TestCase):
 
     def test_can_explorer_bounds_and_filters_the_combined_table(self):
         path = (Path(__file__).resolve().parent / "grafana" /
-                "trevcan-can-explorer.draft.json")
+                "trevcan-history-frames.json")
         dashboard = json.loads(path.read_text(encoding="utf-8"))
         table = dashboard["panels"][0]
         query = table["targets"][0]["query"]

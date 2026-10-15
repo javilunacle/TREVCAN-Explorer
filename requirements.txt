@@ -1,17 +1,3 @@
-# TREVCAN-Explorer Python dependencies
-
-# Backend API
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-websockets>=13.0
-pydantic>=2.9.0
-python-multipart>=0.0.12
-httpx>=0.27.0
-
-# CAN communication
+# Runtime dependencies for the telemetry pipeline.
 python-can>=4.4.0
 cantools>=39.4.0
-pyusb>=1.2.1
-requests>=2.28.0
-
-# Desktop GUI

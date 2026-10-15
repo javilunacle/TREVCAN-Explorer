@@ -1,8 +1,8 @@
 """Finite, DBC-encoded end-to-end scenarios for the off-car telemetry stack.
 
 The runner deliberately never imports or opens python-can.  It encodes raw CAN
-payloads from the repository DBC files, places them in an isolated temporary
-car spool, and sends them through the normal authenticated TCP receiver.  This
+payloads from the repository DBC files and sends them through the normal
+RAM-batched authenticated TCP receiver. This
 exercises the decoder, transform worker, InfluxDB export, and Grafana queries
 without transmitting anything onto a physical CAN bus.
 """
@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import json
 import os
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -19,10 +18,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .car import CarSpool, send_forever
+from .buffers import CarBuffer
+from .car import send_forever
 
 
-DBC_DIRECTORY = Path(__file__).resolve().parents[1] / "webserver/backend/dbc_files"
+DBC_DIRECTORY = Path(__file__).with_name("dbc_files")
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,6 @@ class Scenario:
     events: tuple
     expected: tuple = ()
     forbidden: tuple = ()
-    buffer_before_connect: bool = False
 
 
 class FrameFactory:
@@ -248,10 +247,6 @@ def build_scenarios(factory=None):
             "decode-mismatch",
             "Valid raw CAN frame whose DLC disagrees with the DBC; remains raw/undecoded.",
             decode_mismatch, ("can_frame",), ("HVC_Pack_Current_A",)),
-        "spool-drain": Scenario(
-            "spool-drain",
-            "Capture the speed scenario before connecting, then drain the durable spool.",
-            speed, ("Vehicle_Speed_mps", "Distance_m"), buffer_before_connect=True),
         "all": Scenario(
             "all", "Run the positive-path calculations, one warning, faults, and DLC mismatch.",
             all_events,
@@ -263,53 +258,54 @@ def build_scenarios(factory=None):
     }
 
 
-def _append_event(spool, event):
+def _append_event(buffer, event):
     frame = event.frame
-    spool.append(
+    buffer.append(
         frame["can_id"], frame["data"], bus=frame["bus"],
         is_extended=frame["is_extended"], is_remote=frame["is_remote"],
         is_fd=frame["is_fd"], is_error=frame["is_error"], dlc=frame["dlc"],
         timestamp_ns=time.time_ns())
 
 
-async def _capture_events(spool, scenario):
+async def _capture_events(buffer, scenario):
     start = asyncio.get_running_loop().time()
     for event in sorted(scenario.events, key=lambda item: item.offset_seconds):
         delay = start + event.offset_seconds - asyncio.get_running_loop().time()
         if delay > 0:
             await asyncio.sleep(delay)
-        _append_event(spool, event)
+        _append_event(buffer, event)
         print(f"[scenario] {event.offset_seconds:5.2f}s  {event.label}", flush=True)
 
 
-async def _wait_for_drain(spool, sender, timeout_seconds):
+async def _wait_for_drain(buffer, sender, timeout_seconds):
     deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while spool.status()["queued"]:
+    while buffer.status()["queued"]:
         if sender.done():
             await sender
         if asyncio.get_running_loop().time() >= deadline:
             raise TimeoutError(
-                f"sender did not drain {spool.status()['queued']} queued frames; "
+                f"sender did not drain {buffer.status()['queued']} queued frames; "
                 "check receiver status, address, and TELEMETRY_TOKEN")
         await asyncio.sleep(0.05)
 
 
-async def run_scenario(scenario, spool, host, port, token, timeout_seconds):
+async def run_scenario(scenario, buffer, host, port, token, timeout_seconds):
     stop = asyncio.Event()
     sender = None
     try:
-        if scenario.buffer_before_connect:
-            await _capture_events(spool, scenario)
-            print(f"[scenario] network held; queued={spool.status()['queued']}", flush=True)
-            await asyncio.sleep(1)
-        else:
-            sender = asyncio.create_task(
-                send_forever(spool, host, port, token, stop, window_size=64))
-            await _capture_events(spool, scenario)
-        if sender is None:
-            sender = asyncio.create_task(
-                send_forever(spool, host, port, token, stop, window_size=64))
-        await _wait_for_drain(spool, sender, timeout_seconds)
+        sender = asyncio.create_task(
+            send_forever(buffer, host, port, token, stop, window_size=64))
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while not buffer.connected:
+            if sender.done():
+                await sender
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("receiver did not connect before scenario capture")
+            await asyncio.sleep(0.01)
+        await _capture_events(buffer, scenario)
+        await _wait_for_drain(buffer, sender, timeout_seconds)
+        if buffer.dropped:
+            raise RuntimeError(f"scenario lost {buffer.dropped} frames; check receiver connectivity/load")
         print("[scenario] receiver acknowledged every synthetic frame", flush=True)
     finally:
         stop.set()
@@ -377,7 +373,6 @@ def main():
     parser.add_argument("--token", default=os.getenv("TELEMETRY_TOKEN"),
                         help="receiver token (default: TELEMETRY_TOKEN)")
     parser.add_argument("--car-id", help="test stream ID; default is unique per run")
-    parser.add_argument("--db", help="keep/use this scenario spool instead of a temporary file")
     parser.add_argument("--timeout", type=float, default=15,
                         help="seconds allowed for sender drain and verification")
     parser.add_argument("--verify", action="store_true",
@@ -408,21 +403,14 @@ def main():
     scenario = scenarios[args.scenario]
     car_id = args.car_id or (
         f"scenario-{scenario.name}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}")
-    temporary = None
-    if args.db:
-        spool_path = Path(args.db)
-    else:
-        temporary = tempfile.TemporaryDirectory(prefix="trevcan-scenario-")
-        spool_path = Path(temporary.name) / "scenario.sqlite3"
-
+    buffer = CarBuffer(car_id)
+    car_id = buffer.car_id
     print(json.dumps({"scenario": scenario.name, "car_id": car_id,
                       "frames": len(scenario.events), "receiver": f"{args.host}:{args.port}",
                       "socketcan": "not used"}, indent=2), flush=True)
-    spool = None
     try:
-        spool = CarSpool(spool_path, car_id)
         asyncio.run(run_scenario(
-            scenario, spool, args.host, args.port, args.token, args.timeout))
+            scenario, buffer, args.host, args.port, args.token, args.timeout))
         if args.verify:
             asyncio.run(verify_scenario(
                 scenario, car_id, args.influx_host, args.influx_port,
@@ -431,10 +419,7 @@ def main():
     except (OSError, TimeoutError, RuntimeError, ValueError) as exc:
         parser.exit(1, f"FAIL: {scenario.name}: {exc}\n")
     finally:
-        if spool is not None:
-            spool.close()
-        if temporary is not None:
-            temporary.cleanup()
+        buffer.close()
 
 
 if __name__ == "__main__":

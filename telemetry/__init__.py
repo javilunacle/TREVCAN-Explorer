@@ -1,1 +1,1 @@
-"""Durable raw-CAN transport for the car-to-server telemetry path."""
+"""RAM-batched vehicle telemetry with Grafana Live and InfluxDB history."""

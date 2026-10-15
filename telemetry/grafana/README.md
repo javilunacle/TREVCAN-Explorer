@@ -1,35 +1,62 @@
 # TREVCAN Grafana dashboards
 
-The telemetry-Pi deployment provisions seven **read-only** dashboards from
-this directory:
+The telemetry-Pi deployment provisions ten monitoring dashboards from this
+directory:
 
-- `TREVCAN - Vehicle Overview`
-- `TREVCAN - BMS`
-- `TREVCAN - HVC`
-- `TREVCAN - Inverter`
-- `TREVCAN - VCU`
-- `TREVCAN - MOBO`
-- `TREVCAN CAN Explorer (combined draft)`
+- `TREVCAN - Live Telemetry`
+- `TREVCAN - Historical Vehicle Overview`
+- `TREVCAN - Historical Analysis`
+- `TREVCAN - Historical Synthetic Validation`
+- `TREVCAN - Historical BMS`
+- `TREVCAN - Historical HVC`
+- `TREVCAN - Historical Inverter`
+- `TREVCAN - Historical VCU`
+- `TREVCAN - Historical MOBO`
+- `TREVCAN - Historical CAN Frames`
+
+**Live Telemetry** uses the built-in `-- Grafana --` data source's Live
+Measurements queries, with no InfluxDB queries or polling selectors. The
+receiver pushes small batches to `/api/live/push/trevcan`. A message has a
+bus/ID/extended-aware channel, such as `stream/trevcan/can0_000000a0_std`.
+Wide fields `signal.NAME` carry every numeric decoded update; `state.NAME`
+preserves textual/enum labels. `stream/trevcan/can_frames` carries every fresh
+raw frame with its bus, ID, sequence, bytes, DBC, and decoded summary. Capture
+timestamps are preserved. Synthetic scenarios use `trevcan_synthetic` instead.
+
+The Live dashboard includes four key vehicle graphs, a static DBC-message
+selector, selected-message samples/latest values, and recent raw frames. Its
+one-minute view is limited to a browser buffer of at most 20,000 rows per query;
+it starts when the viewer subscribes. Use capture timestamps to assess stale
+values. Grafana Live is not the historical archive. The rest of the dashboards
+use InfluxDB for historical analysis; their stable UIDs/URLs are preserved.
 
 The subsystem dashboards replace the original catch-all Systems graph. Signals
 with different units are split into separate panels, legends display the signal
 name, and high-cardinality BMS data uses a module selector plus last-value
 tables/bar gauges instead of plotting the entire accumulator in one graph.
 
-`render_provisioned.py` combines the importable CAN Explorer draft with the
+`render_provisioned.py` combines the historical CAN-frame template with the
 dashboard definitions in `dashboard_specs.py` and writes the results to the
 ignored `generated/` directory. `telemetry/start_server_pi.sh` runs the renderer
 before starting Docker. Grafana loads the rendered files through its file
 provisioner and stores user preferences in its persistent Docker volume.
 
-The dashboards refresh every five seconds by default. A one-second option is
-available when a faster live view is useful. A shorter interval increases load
+Historical dashboards refresh every five seconds by default. A one-second option is
+available. A shorter interval increases load
 on both Grafana and InfluxDB, particularly when several viewers are connected.
 
-## Data model
+## Historical data model
 
-The CAN Explorer combines raw and decoded fields from the `can_frame`
-measurement. Its live table is deliberately limited to the latest minute and
+During healthy capture, InfluxDB receives every raw frame and every numeric
+decoded sample, rather than the latest value from each export batch. Outages
+leave gaps: neither Pi keeps a SQLite replay queue. Historical chart queries may
+downsample for display; integrations and derivatives consume every selected
+source update before their derived publication policy is applied. Transform
+state stays in receiver RAM and advances after successful writes. Restarting
+the receiver resets running totals; the session catalog contains metadata only.
+
+The CAN-frame dashboard combines raw and decoded fields from the `can_frame`
+measurement. Its recent-frames table is deliberately limited to the latest minute and
 500 rows so Grafana does not pivot and sort the full dashboard time range on
 every refresh. DBC-file and CAN-bus selectors make the combined table easier
 to inspect; selecting **All** keeps unknown CAN IDs visible as
@@ -45,29 +72,12 @@ team-approved DBC set.
 
 ## Scope and safety boundary
 
-Grafana replaces the monitoring portions of the React BMS, HVC, inverter, VCU,
-and MOBO pages. It does **not** reproduce Balance Manager, Module Config, reset,
-relay, passthrough, inverter-command, or other CAN-transmit controls. Those
-controls need a separately authenticated and reviewed command path; they must
-not be exposed as general Grafana actions.
+Grafana provides monitoring for BMS, HVC, inverter, VCU, and MOBO telemetry.
+The pipeline does not transmit CAN commands or flash firmware. Telemetry Tools
+controls only capture start/stop; it cannot power off the vehicle.
 
 The dashboards are only as accurate as the active DBCs, clocks, and source
 frames. Synthetic replay proves the query/display path but does not validate
 the car wiring, real message cadence, sustained throughput, signal semantics,
 or power-loss behavior. Validate every panel with real frames before treating
-it as the operational replacement for the React Explorer.
-
-## Optional backfill for older raw data
-
-Frames exported before the combined Explorer fields were added retain their raw
-data but do not automatically gain the decoded summary. A demo database can be
-backfilled without modifying the raw SQLite archive or car spool. First dry-run:
-
-```powershell
-.\.venv\Scripts\python.exe -m telemetry.backfill --db telemetry-server.sqlite3 --dbc-bus can0=webserver/backend/dbc_files/BMS-Firmware-RTOS-Complete.dbc --dbc-bus can0=webserver/backend/dbc_files/hvc.dbc --dbc-bus can0=webserver/backend/dbc_files/VCU.dbc --dbc-bus can0=webserver/backend/dbc_files/BMS-Inverter-Only.dbc --dbc-bus can0=webserver/backend/dbc_files/Baby_MOBO.dbc --dbc-bus can1=webserver/backend/dbc_files/DAQ-Firmware.dbc --dbc-bus can1=webserver/backend/dbc_files/VCU.dbc --dbc-bus can1=webserver/backend/dbc_files/can9-database-01.09.dbc
-```
-
-If the count is expected, add `--write`. The command reads `INFLUXDB_TOKEN` from
-the environment or prompts for it. Never place the token directly in a command
-or commit it. This backfill is for historical visualization only and does not
-create new `can_signal` points.
+using it for test-day monitoring.

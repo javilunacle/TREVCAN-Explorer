@@ -1,31 +1,50 @@
 # TREVCAN off-car telemetry
 
-This is the current runbook for the two-Pi vehicle telemetry system.
+This is the runbook for the two-Pi vehicle telemetry system. Examples use
+`~/TREVCAN-Telemetry`; existing checkout locations also work because service
+installers use the actual checkout path. SocketCAN `can0` and `can1` must be
+configured separately on the car Pi.
 
 ## Current layout
 
 | Role | Address | Account | Purpose |
 | --- | --- | --- | --- |
-| Car Pi | `192.168.0.145` | `trevor` | Reads SocketCAN `can0` and `can1`, then durably sends raw frames |
+| Car Pi | `192.168.0.145` | `trevor` | Reads SocketCAN `can0` and `can1`, then streams raw frames |
 | Telemetry Pi | `192.168.0.136` | `pi` | Receives/ACKs frames, decodes DBCs, runs InfluxDB, Grafana, and test controls |
 
 ```text
 car can0/can1
   -> short RAM batch
-  -> car SQLite spool
   -> authenticated TCP batches
-  -> telemetry-Pi SQLite durable commit
-  -> cumulative ACK to car
-  -> bus-aware DBC decoding
-  -> source-timestamp live transforms and 100 ms visualization snapshots
-  -> InfluxDB
-  -> Grafana viewers
+  -> telemetry-Pi RAM acceptance + ACK
+  -> independent downstream workers:
+       live: bus-aware DBC decoding -> small Grafana Live batches -> live viewers
+       history: every raw/decoded sample + source-time transforms -> InfluxDB
+                                                               -> historical viewers
 ```
 
-The car removes a frame from its spool only after the telemetry Pi has durably
-committed and acknowledged it. A network or receiver outage therefore grows
-the car queue; reconnecting drains it. Decode failures do not prevent raw
-storage or ACKs.
+The default policy is **discard disconnected data and resume fresh**. Neither Pi
+opens a SQLite spool in the active pipeline. ACKs confirm acceptance into RAM,
+not durable storage. Sequence gaps are expected and accepted after drops.
+
+Both the car sender and historical-export queue are capped at 4096 frames and
+one second of local queue age. The car discards frames while disconnected and
+clears pending frames when the connection fails. It reconnects automatically
+and sends newly captured samples; it never drains an old disk backlog.
+
+Live and historical writes run independently. The Live worker normally sends
+up to 256 fresh frames every 20 ms, preserving every decoded value in a batch.
+During healthy capture the historical worker sends every raw frame and numeric
+decoded update to InfluxDB with the original nanosecond capture timestamp.
+An Influx failure discards pending history and samples collected during the
+retry pause. Live continues independently. If Live fails, history can continue.
+
+Live has a separate 8192-frame RAM cap and excludes samples more than two
+seconds away from the telemetry Pi's clock. Keep both Pi clocks synchronized.
+Receiver logs report live `sent`, `stale`, `overflow`, and `failed` counters,
+plus `[history-buffer]` queue/drop counts. These are best-effort views: outages,
+restart, or overload can leave gaps. A 20 ms batching interval is a target, not
+an end-to-end latency guarantee.
 
 This phase is supervised. The car sender, receiver, and TREVCAN Telemetry
 Tools page are installed as user services but are **disabled at boot**.
@@ -49,7 +68,7 @@ Connect to the telemetry Pi:
 
 ```bash
 ssh pi@192.168.0.136
-cd ~/TREVCAN-Explorer
+cd ~/TREVCAN-Telemetry
 git status -sb
 git fetch --all --prune
 git switch off_car
@@ -60,7 +79,7 @@ Create or update the Python environment:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip cantools
+.venv/bin/pip install -r requirements.txt
 ```
 
 Create the private configuration only if it does not already exist:
@@ -78,6 +97,9 @@ Set every example value. These credentials have different purposes:
   bucket `home`. Preserve the working token when reusing the existing Docker
   volume.
 - InfluxDB and Grafana admin usernames/passwords: web-service credentials.
+- `GRAFANA_LIVE_URL='http://127.0.0.1:3000/api/live/push/trevcan'`: receiver's
+  local Grafana push endpoint. Leave the Live token placeholder until Grafana
+  has started, then create the publisher token as described below.
 - `GRAFANA_BIND_ADDRESS='0.0.0.0'`: allows LAN viewers to reach Grafana.
 - `TELEMETRY_CAR_HOST='192.168.0.145'` and
   `TELEMETRY_CAR_USER='trevor'`.
@@ -95,6 +117,18 @@ set +a
 docker compose -f docker-compose.telemetry-pi.yml up -d
 ```
 
+Open `http://telemetrypi.local:3000` (or `http://192.168.0.136:3000`) and sign in.
+Under **Administration → Users and access → Service accounts**, create a
+`trevcan-live` service account with the **Admin** role and generate a token.
+Set `GRAFANA_LIVE_TOKEN` in the private `.env.telemetry` to that token. This is a
+separate publisher credential; do not put it in dashboard JSON or on the car Pi.
+The receiver launcher requires it before starting telemetry. Existing installs
+need these two Live variables added to their existing private configuration.
+
+Grafana accepts line protocol at this endpoint and serves subscribers over
+WebSockets; no Telegraf service is required. See the official
+[Grafana Live push tutorial](https://grafana.com/tutorials/stream-metrics-from-telegraf-to-grafana/).
+
 Install the receiver service. Do not add `--enable-at-boot`:
 
 ```bash
@@ -106,8 +140,7 @@ The expected result is `disabled`.
 
 ### 2. Prepare the car Pi
 
-Use a separate telemetry checkout so the existing in-car Explorer checkout is
-not replaced:
+Create a dedicated telemetry checkout:
 
 ```bash
 ssh trevor@192.168.0.145
@@ -124,12 +157,15 @@ git status -sb
 git pull --ff-only
 ```
 
-Confirm the existing vehicle Python environment still provides `python-can`:
+Create a local environment for the car sender:
 
 ```bash
-/home/trevor/TREVCAN-Explorer/venv/bin/python -c \
-  'import can; print(can.__version__)'
+python3 -m venv .venv
+.venv/bin/pip install python-can
 ```
+
+The installer uses this checkout's `.venv/bin/python`. Set
+`TREVCAN_CAR_PYTHON` explicitly if another Python environment is required.
 
 Install the car service, again without `--enable-at-boot`:
 
@@ -139,8 +175,8 @@ bash telemetry/install_car_service.sh 192.168.0.136
 
 When prompted, enter the exact `TELEMETRY_TOKEN` from the telemetry Pi. The
 installer copies only the small sender package to `~/.local/share/trevcan`,
-stores its private configuration in `~/.config/trevcan/car.env`, and uses the
-canonical spool at `~/trevcan-data/car-spool.sqlite3`.
+stores its private configuration in `~/.config/trevcan/car.env`, and batches
+frames in RAM. No spool file is created.
 
 Verify that the service is installed but not running automatically:
 
@@ -157,7 +193,7 @@ Return to the telemetry Pi:
 
 ```bash
 ssh pi@192.168.0.136
-cd ~/TREVCAN-Explorer
+cd ~/TREVCAN-Telemetry
 bash telemetry/setup_control_pi.sh 192.168.0.145 trevor
 ```
 
@@ -218,12 +254,18 @@ Then the test operator does not need SSH:
    `http://telemetrypi.local:3000/dashboards` directly. All provisioned
    dashboards include a **Telemetry tools** link back to TREVCAN Telemetry
    Tools. Use
-   **TREVCAN - Live Analysis** for distance, power/energy, rate of temperature
-   change, transform diagnostics, and the alignment-gated GG plot. Normal
+   **TREVCAN - Live Telemetry** for streamed speed, voltage, current, temperature,
+   a DBC message selector, decoded samples, and recent raw CAN frames. This
+   dashboard subscribes to Live channels and makes no InfluxDB queries. Its
+   recent window begins with the subscription and is bounded in the browser;
+   inspect capture timestamps if data stops. Use **TREVCAN - Historical Analysis**
+   for distance, power/energy, rate of temperature change, transform diagnostics,
+   and the alignment-gated GG plot. The other **Historical** dashboards query
+   InfluxDB for recorded subsystem data. Normal
    dashboards automatically exclude synthetic scenario streams. Use the
    optional **Test session** selector only when reviewing an earlier run.
 5. Select **End Test - Stop Telemetry** when capture should stop. This cleanly
-   stops and syncs only the telemetry sender. The car Pi and every other car
+   stops only the telemetry sender. The car Pi and every other car
    service remain powered.
 6. Use the team's separate vehicle shutdown procedure if the car itself should
    be turned off. TREVCAN Telemetry Tools cannot power off the car Pi.
@@ -242,33 +284,34 @@ systemctl --user stop trevcan-telemetry-receiver.service
 
 ## Verification
 
-On the car Pi, the queue should normally remain small and return toward zero:
+Read running-process counters from the journals:
 
 ```bash
-cd /home/trevor/.local/share/trevcan
-/home/trevor/TREVCAN-Explorer/venv/bin/python -m telemetry.car \
-  --status --db /home/trevor/trevcan-data/car-spool.sqlite3
-```
+# Car Pi
+journalctl --user -u trevcan-telemetry-car.service -f
 
-On the telemetry Pi:
-
-```bash
-cd ~/TREVCAN-Explorer
-.venv/bin/python -m telemetry.server \
-  --status --db ~/trevcan-data/telemetry-server.sqlite3
+# Telemetry Pi
+journalctl --user -u trevcan-telemetry-receiver.service -f
 sudo ss -ltnp | grep ':8765'
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 ```
 
+RAM queues have no separate `--status --db` command. Car logs contain
+`[car-buffer]` with `connected`, `queued`, and `dropped`; receiver logs contain
+`[history-buffer]` and `[grafana-live]`.
+
 Expected behavior:
 
-- `last_acked` and the receiver stream checkpoint increase during capture.
+- `last_acked` and the in-memory receiver sequence increase during capture.
 - The car `queued` count fluctuates near zero. A temporary rise is acceptable
   if it subsequently drains.
 - `pending_influx` remains bounded and falls after input stops.
 - Grafana timestamps remain close to current time.
+- `[grafana-live]` reports increasing `sent` with zero `overflow` and `failed`
+  during healthy capture. If `stale` rises, check clock synchronization and
+  queue delay. `dropped` rises during outages/overload; this is intentional.
 - Both `can0` and `can1` appear in the current data.
-- The Live Analysis dashboard begins a new set of distance and energy totals
+- The Historical Analysis dashboard begins a new set of distance and energy totals
   for each new supervised test session.
 
 Service logs:
@@ -282,36 +325,32 @@ journalctl --user -u trevcan-telemetry-control.service -f
 journalctl --user -u trevcan-telemetry-car.service -f
 ```
 
-## Data lifetime and recovery
+## Data lifetime and outages
 
-- Car SQLite is a spool, not a 24-hour archive. ACKed rows are deleted;
-  unacknowledged rows remain until delivered.
-- Telemetry-Pi SQLite is a durable raw staging database. Successfully exported
-  raw rows are retained for 15 minutes by default, then pruned. Unexported rows
-  are never pruned by the age policy.
-- The InfluxDB `home` bucket retains dashboard data for 24 hours.
-- Transform checkpoints are stored in telemetry-Pi SQLite in the same
-  transaction that marks a raw batch exported. If an Influx write is retried,
-  distance and energy are recomputed from the prior checkpoint instead of
-  being counted twice.
-- The same SQLite files are reused across Stop/Start and reconnects. Do not
-  create a different database for every test.
+- Both Pis discard disconnected data. No capture data survives in RAM after
+  its process restarts, and no SQLite queue is recovered on startup.
+- Small buffers smooth normal batching only. They expire old entries and
+  discard the oldest frames at capacity instead of growing during an outage.
+- InfluxDB is the historical store. Successfully recorded samples remain for
+  the bucket's 24-hour retention period; an outage appears as a time gap.
+- Integrations and derivatives use source timestamps and their existing gap
+  limits. Running transform state is held in RAM and resets when the receiver
+  restarts. Begin a new test session after a receiver restart when comparing
+  session totals. The session JSON file contains metadata, not a CAN backlog.
+- Older SQLite files are left untouched and are never replayed automatically.
+  The active pipeline has no archive migration or SQLite backfill tools.
 
-An unexpected power cut can lose only frames still in the short uncommitted RAM
-batch and can still damage an SD card. Already committed unacknowledged frames
-remain in the car spool. Because boot startup is disabled, select **Start Test**
-after the next boot to resume and drain them.
+After an outage or reboot, select **Start Test** as usual. Capture resumes with
+current frames, without trying to recover disconnected data.
 
-Do not delete an active SQLite file or its `-wal`, `-shm`, or `.lock` files.
-
-## Live-analysis policy
+## Historical transform policy
 
 The receiver reads `telemetry/transform_policies.json`. Calculations consume
 every selected decoded update in source-timestamp order; the fast/medium/slow
 policy changes only how often derived points are published to InfluxDB. It does
-not replace the raw or decoded measurements. The initial publication targets
+not replace the full-sample raw or decoded measurements. The initial publication targets
 are 10 Hz for fast outputs, 5 Hz for medium outputs, and 1 Hz for slow outputs.
-This work runs in the telemetry-Pi export worker after the durable raw ACK path;
+This work runs in the telemetry-Pi export worker after RAM acceptance;
 it adds no transform processing to the car Pi.
 
 The initial policy provides:
@@ -343,25 +382,29 @@ Run synthetic scenarios on the **telemetry Pi**, with the real car test ended.
 They use a unique `scenario-*` car ID and the normal authenticated TCP receiver,
 DBC decoder, transform worker, InfluxDB, and Grafana path. They never open
 SocketCAN and never transmit onto `can0` or `can1`. Normal vehicle dashboards
-exclude their `scenario-*` stream IDs, while **TREVCAN - Synthetic Validation**
-shows only scenario output. The combined-draft CAN Explorer remains an
+exclude their `scenario-*` stream IDs, while **TREVCAN - Historical Synthetic Validation**
+shows only scenario output. **TREVCAN - Historical CAN Frames** is an
 engineering view that can include both.
 
 Start only the receiver, list the available scenarios, and run the full suite:
 
 ```bash
-cd ~/TREVCAN-Explorer
+cd ~/TREVCAN-Telemetry
 systemctl --user start trevcan-telemetry-receiver.service
 bash telemetry/run_scenario_pi.sh --list
 bash telemetry/run_scenario_pi.sh --scenario all
 ```
 
-The wrapper reads both tokens from `.env.telemetry`, uses a temporary durable
-spool, waits for every frame to be acknowledged, and verifies the expected
-InfluxDB output. Open **TREVCAN - Live Analysis** with **Last 5 minutes** selected
-to see only real-car derived results. Open **TREVCAN - Synthetic Validation**
+The wrapper reads both tokens from `.env.telemetry`, uses a RAM buffer,
+waits for the receiver connection before capturing, and verifies the expected
+InfluxDB output. Open **TREVCAN - Historical Analysis** with **Last 5 minutes** selected
+to see only real-car derived results. Open **TREVCAN - Historical Synthetic Validation**
 to see scenario calculations, GG points, diagnostic events, and synthetic HVC
 fault bits without mixing them into vehicle graphs.
+
+Synthetic Live output uses namespace `trevcan_synthetic` (or the configured
+namespace plus `_synthetic`). The normal Live dashboard subscribes only to
+`trevcan`, so synthetic output cannot appear as real-car Live samples.
 
 Focused examples:
 
@@ -370,14 +413,13 @@ bash telemetry/run_scenario_pi.sh --scenario temperature-spike
 bash telemetry/run_scenario_pi.sh --scenario gg-valid
 bash telemetry/run_scenario_pi.sh --scenario gg-invalid
 bash telemetry/run_scenario_pi.sh --scenario stale-electrical-pair
-bash telemetry/run_scenario_pi.sh --scenario spool-drain
 ```
 
 `temperature-spike` verifies the current diagnostic warning rule.
 `gg-invalid` and `stale-electrical-pair` are negative tests: they pass only when
-GG or pack-power output is correctly suppressed. `spool-drain` captures all
-samples before opening the TCP connection, then confirms that the temporary
-SQLite backlog drains. Stop the receiver afterward if no real test is active:
+GG or pack-power output is correctly suppressed. The former `spool-drain`
+scenario has been removed: disconnected samples are intentionally discarded.
+Stop the receiver afterward if no real test is active:
 
 ```bash
 systemctl --user stop trevcan-telemetry-receiver.service
@@ -400,16 +442,27 @@ The car's `~/.config/trevcan/car.env` and telemetry Pi's `.env.telemetry` must
 contain the same `TELEMETRY_TOKEN`. Rerun the car installer to update its copy.
 Do not confuse this transport token with `INFLUXDB_TOKEN`.
 
-### Car queue keeps growing
+### Live dashboard is empty while history continues
 
-Check the receiver service, port 8765, receiver logs, `pending_influx`, LAN
-connectivity, and both Pi clocks. A growing queue means the receiver is not
-ACKing as fast as the car is capturing; changing Grafana refresh rate does not
-fix transport backlog.
+Check `[grafana-live]` receiver logs and the private `GRAFANA_LIVE_TOKEN`.
+The token needs the Grafana publisher service account's Admin role. Confirm
+both Pi clocks, that fresh car frames are arriving, and that the viewer can
+connect to Grafana's `/api/live/ws` endpoint. Direct access on port 3000 supports
+WebSockets; any additional reverse proxy must forward WebSocket upgrades.
+Historical data is still recorded during Live failures. Opening a Live panel
+does not load earlier samples from InfluxDB; use a Historical dashboard for that.
+
+### Samples are being dropped
+
+Check the receiver service, TCP port 8765, LAN connectivity, Pi clocks, and
+`[car-buffer]` / `[history-buffer]` / `[grafana-live]` counters. Queues are bounded;
+a rising drop count means the link or consumer is unavailable or cannot keep
+up. An outage leaves a gap instead of a disk backlog. Reducing Grafana polling
+does not fix a transport problem.
 
 ### DBC decode warnings appear
 
-Raw frames are still stored and acknowledged. The current decoder routes these
+Raw frames are still accepted and offered to the downstream workers. The current decoder routes these
 DBCs by source bus:
 
 - `can0`: BMS RTOS, HVC, VCU, inverter, and Baby MOBO DBCs.
@@ -417,24 +470,25 @@ DBCs by source bus:
 
 Warnings about unexpected DLCs or multiplexor values indicate firmware/DBC
 drift or an incomplete DBC definition. Fix the matching DBC or bus map; do not
-reset the spool merely to hide decode warnings.
+change buffering merely to hide decode warnings.
 
 ### Existing car applications consume high CPU
 
-The telemetry sender passively reads SocketCAN and does not require the old
-Explorer to be stopped. Do not disable unknown vehicle services without team
-approval. If combined CPU load or temperature affects testing, coordinate with
-the owner of `trev-dash.service` or `trevcan-explorer.service` before stopping
-either one.
+The telemetry sender passively reads SocketCAN alongside other vehicle
+applications. Do not disable unknown vehicle services without team approval.
+Coordinate with their owners if combined CPU load or temperature affects testing.
 
 ## Updating after code changes
 
-Pull and reinstall the service package on each Pi. The installers remain
+End the active test, then stop the receiver before upgrading. Reinstall the
+car service: its old `--db` argument and SQLite configuration are no longer
+used. Existing database files can remain in place. The installers remain
 disabled-at-boot by default:
 
 ```bash
 # Telemetry Pi
-cd ~/TREVCAN-Explorer
+systemctl --user stop trevcan-telemetry-receiver.service
+cd ~/TREVCAN-Telemetry
 git pull --ff-only
 bash telemetry/install_receiver_service.sh
 bash telemetry/install_control_service.sh --start-now
@@ -446,4 +500,4 @@ bash telemetry/install_car_service.sh 192.168.0.136
 ```
 
 Only use `--enable-at-boot` later, after competition startup behavior and
-power-loss recovery have been deliberately validated.
+restart behavior have been deliberately validated.

@@ -16,13 +16,16 @@ source "$env_file"
 set +a
 
 required=(TELEMETRY_TOKEN INFLUXDB_TOKEN INFLUXDB_ADMIN_USERNAME
-          INFLUXDB_ADMIN_PASSWORD GRAFANA_ADMIN_USERNAME GRAFANA_ADMIN_PASSWORD)
+          INFLUXDB_ADMIN_PASSWORD GRAFANA_ADMIN_USERNAME GRAFANA_ADMIN_PASSWORD
+          GRAFANA_LIVE_TOKEN)
 for name in "${required[@]}"; do
     if [[ -z "${!name:-}" || "${!name}" == replace-with-* ]]; then
         echo "$name is missing or still has its example value in $env_file" >&2
         exit 1
     fi
 done
+
+export GRAFANA_LIVE_URL="${GRAFANA_LIVE_URL:-http://127.0.0.1:3000/api/live/push/trevcan}"
 
 python_bin="${TREVCAN_PYTHON:-$repo_root/.venv/bin/python}"
 if [[ ! -x "$python_bin" ]]; then
@@ -44,18 +47,16 @@ influx_url='http://127.0.0.1:8086/api/v2/write?org=docs&bucket=home&precision=ns
 exec "$python_bin" -m telemetry.server \
     --host 0.0.0.0 \
     --port 8765 \
-    --db "$data_dir/telemetry-server.sqlite3" \
     --token "$TELEMETRY_TOKEN" \
-    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/BMS-Firmware-RTOS-Complete.dbc" \
-    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/hvc.dbc" \
-    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/VCU.dbc" \
-    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/BMS-Inverter-Only.dbc" \
-    --dbc-bus "can0=$repo_root/webserver/backend/dbc_files/Baby_MOBO.dbc" \
-    --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/DAQ-Firmware.dbc" \
-    --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/VCU.dbc" \
-    --dbc-bus "can1=$repo_root/webserver/backend/dbc_files/can9-database-01.09.dbc" \
+    --dbc-bus "can0=$repo_root/telemetry/dbc_files/BMS-Firmware-RTOS-Complete.dbc" \
+    --dbc-bus "can0=$repo_root/telemetry/dbc_files/hvc.dbc" \
+    --dbc-bus "can0=$repo_root/telemetry/dbc_files/VCU.dbc" \
+    --dbc-bus "can0=$repo_root/telemetry/dbc_files/BMS-Inverter-Only.dbc" \
+    --dbc-bus "can0=$repo_root/telemetry/dbc_files/Baby_MOBO.dbc" \
+    --dbc-bus "can1=$repo_root/telemetry/dbc_files/DAQ-Firmware.dbc" \
+    --dbc-bus "can1=$repo_root/telemetry/dbc_files/VCU.dbc" \
+    --dbc-bus "can1=$repo_root/telemetry/dbc_files/can9-database-01.09.dbc" \
     --influx-url "$influx_url" \
     --influx-token "$INFLUXDB_TOKEN" \
     --transform-policy "$repo_root/telemetry/transform_policies.json" \
-    --session-file "$data_dir/telemetry-sessions.json" \
-    --raw-retention-hours "${TELEMETRY_RAW_RETENTION_HOURS:-0.25}"
+    --session-file "$data_dir/telemetry-sessions.json"

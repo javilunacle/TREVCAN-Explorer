@@ -1,0 +1,121 @@
+"""Grafana Live views using static DBC selectors, without Influx queries."""
+
+import os
+from pathlib import Path
+
+import cantools
+
+from telemetry.live import live_measurement, stream_namespace
+from telemetry.grafana.dashboard_specs import _dashboard
+
+
+LIVE_DATASOURCE = {"type": "grafana", "uid": "grafana"}
+DBC_DIRECTORY = Path(__file__).resolve().parents[1] / "dbc_files"
+BUS_DBCS = {
+    "can0": ["BMS-Firmware-RTOS-Complete.dbc", "hvc.dbc", "VCU.dbc",
+             "BMS-Inverter-Only.dbc", "Baby_MOBO.dbc"],
+    "can1": ["DAQ-Firmware.dbc", "VCU.dbc", "can9-database-01.09.dbc"],
+}
+
+
+def channel_catalog():
+    """Match receiver DBC priority; identical CAN IDs on different buses stay separate."""
+    catalog = {}
+    databases = {}
+    for bus, filenames in BUS_DBCS.items():
+        for filename in filenames:
+            if filename not in databases:
+                databases[filename] = cantools.database.load_file(
+                    DBC_DIRECTORY / filename, strict=False)
+            for message in databases[filename].messages:
+                channel = live_measurement(bus, message.frame_id, message.is_extended_frame)
+                catalog.setdefault(channel, {
+                    "bus": bus, "dbc": filename, "message": message.name,
+                    "signals": {signal.name for signal in message.signals},
+                    "channel": channel,
+                })
+    return sorted(catalog.values(), key=lambda item: (item["bus"], item["message"]))
+
+
+def _target(namespace, channel, *, fields=None):
+    target = {"refId": "A", "datasource": LIVE_DATASOURCE,
+              "queryType": "measurements", "channel": f"stream/{namespace}/{channel}",
+              "buffer": 60000}
+    if fields:
+        target["filter"] = {"fields": fields}
+    return target
+
+
+def _panel(panel_id, title, grid, target, *, kind="timeseries", unit=None):
+    defaults = {"custom": {"spanNulls": False}, "noValue": "No live samples"}
+    if unit:
+        defaults["unit"] = unit
+    panel = {"id": panel_id, "title": title, "type": kind, "gridPos": grid,
+             "datasource": LIVE_DATASOURCE, "targets": [target],
+             "maxDataPoints": 10000, "fieldConfig": {"defaults": defaults, "overrides": []},
+             "options": {"legend": {"displayMode": "table", "placement": "bottom",
+                                      "calcs": ["lastNotNull"]},
+                         "tooltip": {"mode": "multi"}},
+             "description": "Grafana Live subscription. Values use the car's capture timestamps. "
+                            "The browser retains a bounded recent window; use Historical dashboards "
+                            "for earlier samples. Check timestamps when capture stops."}
+    if kind == "table":
+        panel["options"] = {"showHeader": True, "sortBy": [{"displayName": "Time", "desc": True}]}
+    return panel
+
+
+def live_dashboard():
+    namespace = stream_namespace(os.getenv("GRAFANA_LIVE_URL") or
+                                 "http://127.0.0.1:3000/api/live/push/trevcan")
+    catalog = channel_catalog()
+    options = [{"text": f"{item['bus']} / {item['dbc']} / {item['message']}",
+                "value": item["channel"], "selected": False} for item in catalog]
+    current = options[0]
+    # Prefer the actual speed message instead of assuming a firmware CAN ID.
+    speed = next((item for item in catalog if item["bus"] == "can0" and
+                  "VCU_Speed_MPH" in item["signals"]), None)
+    if speed:
+        current = next(item for item in options if item["value"] == speed["channel"])
+    current["selected"] = True
+    variable = {"name": "can_message", "label": "CAN message", "type": "custom",
+                "query": ",".join(f"{item['text']} : {item['value']}" for item in options),
+                "options": options, "current": current.copy(), "multi": False,
+                "includeAll": False, "hide": 0, "skipUrlSync": False}
+    panels = []
+    overview = [
+        ("Vehicle speed", "VCU_Speed_MPH", "VCU.dbc", "velocitymph"),
+        ("Pack voltage", "HVC_Batt_Voltage_V", "hvc.dbc", "volt"),
+        ("Pack current", "HVC_Pack_Current_A", "hvc.dbc", "amp"),
+        ("Accumulator temperature", "HVC_Acc_Temp_Max_C", "hvc.dbc", "celsius"),
+    ]
+    for index, (title, signal, dbc, unit) in enumerate(overview):
+        message = next(item for item in catalog if item["bus"] == "can0" and
+                       item["dbc"] == dbc and signal in item["signals"])
+        panels.append(_panel(index + 1, title,
+                             {"x": (index % 2) * 12, "y": (index // 2) * 7, "w": 12, "h": 7},
+                             _target(namespace, message["channel"], fields=[f"signal.{signal}"]),
+                             unit=unit))
+    selected = _panel(5, "Selected message — decoded samples",
+                      {"x": 0, "y": 14, "w": 16, "h": 9},
+                      _target(namespace, "${can_message}"))
+    selected["transformations"] = [{"id": "filterFieldsByName", "options": {
+        "include": {"pattern": "^(Time|time|signal\\..*)$"}}}]
+    panels.append(selected)
+    values = _panel(6, "Selected message — latest values",
+                    {"x": 16, "y": 14, "w": 8, "h": 9},
+                    _target(namespace, "${can_message}"), kind="table")
+    values["transformations"] = [{"id": "reduce", "options": {
+        "reducers": ["lastNotNull"], "mode": "seriesToRows"}}]
+    panels.append(values)
+    panels.append(_panel(7, "Live CAN frames — recent arrivals",
+                         {"x": 0, "y": 23, "w": 24, "h": 10},
+                         _target(namespace, "can_frames"), kind="table"))
+    dashboard = _dashboard("trevcan-live-telemetry", "TREVCAN - Live Telemetry",
+                           "Streaming decoded CAN samples and raw frames. No InfluxDB polling. "
+                           "Synthetic scenarios use separate channels.", panels,
+                           variables=[variable])
+    dashboard["refresh"] = ""
+    dashboard["liveNow"] = True
+    dashboard["time"] = {"from": "now-1m", "to": "now"}
+    dashboard["tags"].append("live")
+    return dashboard

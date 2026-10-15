@@ -1,4 +1,4 @@
-"""Wire format shared by the car agent and laptop receiver."""
+"""Wire format shared by the car agent and telemetry Pi receiver."""
 
 import json
 
