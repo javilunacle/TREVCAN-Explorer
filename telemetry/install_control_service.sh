@@ -45,13 +45,13 @@ sed -e "s|__REPO_ROOT__|$repo_root|g" -e "s|__HOME__|$HOME|g" \
 install -m 0644 "$temporary" "$unit_path"
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
-systemctl --user disable trevcan-telemetry-control.service >/dev/null 2>&1 || true
+systemctl --user enable trevcan-telemetry-control.service
 
 if [[ "$start_now" == true ]]; then
     systemctl --user restart trevcan-telemetry-control.service
-    echo "TREVCAN Telemetry Tools started for this boot."
+    echo "TREVCAN Telemetry Tools started and enabled at boot."
 else
-    echo "TREVCAN Telemetry Tools installed but not started and disabled at boot."
+    echo "TREVCAN Telemetry Tools enabled at boot; use --start-now to start immediately."
 fi
 echo "Start:  systemctl --user start trevcan-telemetry-control.service"
 echo "Stop:   systemctl --user stop trevcan-telemetry-control.service"

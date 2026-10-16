@@ -46,10 +46,10 @@ plus `[history-buffer]` queue/drop counts. These are best-effort views: outages,
 restart, or overload can leave gaps. A 20 ms batching interval is a target, not
 an end-to-end latency guarantee.
 
-This phase is supervised. The car sender, receiver, and TREVCAN Telemetry
-Tools page are installed as user services but are **disabled at boot**.
-Powering the car for unrelated work does not start telemetry. Boot automation
-is deferred until the competition configuration is approved.
+This phase is supervised. TREVCAN Telemetry Tools starts automatically when
+the telemetry Pi boots, without requiring a login. The car sender and receiver
+are installed as user services but are **disabled at boot**. Powering the car
+for unrelated work does not start telemetry; select **Start Test** to begin.
 
 Use this system only on the team's trusted isolated LAN. TREVCAN Telemetry Tools
 has no login: anyone connected to that LAN can start or stop telemetry. Its
@@ -211,14 +211,21 @@ the Pi. It is restricted to telemetry status/start/stop. When upgrading from
 the earlier prototype, it may ask for the car sudo password once to remove the
 obsolete poweroff permission.
 
-Install and start TREVCAN Telemetry Tools for the current boot:
+Install TREVCAN Telemetry Tools, enable startup at boot, and start it now:
 
 ```bash
 bash telemetry/install_control_service.sh --start-now
 systemctl --user status trevcan-telemetry-control.service --no-pager
 ```
 
-The control service remains disabled at boot even when `--start-now` is used.
+The installer enables the control service at boot and enables user lingering
+so it starts without an SSH login. `--start-now` also restarts it immediately.
+To enable an existing installation without reinstalling:
+
+```bash
+sudo loginctl enable-linger "$USER"
+systemctl --user enable --now trevcan-telemetry-control.service
+```
 
 Install the friendly LAN address once:
 
@@ -234,15 +241,8 @@ fallbacks if a viewer does not support `.local` name resolution.
 
 ## Running a vehicle test
 
-After any telemetry-Pi reboot, a software lead performs this single preparation
-step:
-
-```bash
-ssh pi@192.168.0.136
-systemctl --user start trevcan-telemetry-control.service
-```
-
-Then the test operator does not need SSH:
+TREVCAN Telemetry Tools starts automatically after a telemetry-Pi reboot.
+The test operator does not need SSH:
 
 1. Power the router, telemetry Pi, and car Pi.
 2. Open `http://telemetrypi.local`. If `.local` resolution is unavailable on
