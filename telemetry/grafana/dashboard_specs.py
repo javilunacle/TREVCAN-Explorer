@@ -550,7 +550,27 @@ def inverter_dashboard():
                      'r.signal =~ /^INV_(BMS_Limit|Limit_|Low_Speed_Limit|Enable_Lockout|Post_Fault|Run_Fault)/',
                      {"x": 12, "y": 20, "w": 12, "h": 8}, dbc=dbc,
                      description="Latest read-only limit flags and fault words."),
+        timeseries(14, "Inverter motor and rear wheel RPM",
+                   '(r.bus == "can0" and r.dbc == "BMS-Inverter-Only.dbc" and '
+                   'r.message == "Motor_Position_Info" and r.signal == "INV_Motor_Speed") or '
+                   '(r.bus == "can1" and r.dbc == "DAQ-Firmware.dbc" and '
+                   '((r.message == "DBL_WSPD_BL" and r.signal == "DBL_WSPD_BL_RPM") or '
+                   '(r.message == "DBR_WSPD_BR" and r.signal == "DBR_WSPD_BR_RPM")))',
+                   {"x": 0, "y": 28, "w": 24, "h": 8}, unit="suffix:RPM", decimals=0,
+                   group_columns=("car", "bus", "signal"),
+                   description="Raw inverter motor-shaft RPM and rear-left/rear-right "
+                               "wheel RPM on one axis, with no gearing correction. "
+                               "Signed values are preserved. Check the DAQ rear-wheel "
+                               "Valid and Timeout signals when assessing wheel readings."),
     ]
+    for signal, label, color in (("INV_Motor_Speed", "Inverter motor RPM", "#5794F2"),
+                                 ("DBL_WSPD_BL_RPM", "Rear-left wheel RPM", "#FF9830"),
+                                 ("DBR_WSPD_BR_RPM", "Rear-right wheel RPM", "#73BF69")):
+        panels[-1]["fieldConfig"]["overrides"].append({
+            "matcher": {"id": "byName", "options": signal},
+            "properties": [{"id": "displayName", "value": label},
+                           {"id": "color", "value": {"mode": "fixed", "fixedColor": color}}],
+        })
     return _dashboard(
         "trevcan-inverter", "TREVCAN - Inverter",
         "Historical inverter telemetry recorded from decoded CAN signals.",

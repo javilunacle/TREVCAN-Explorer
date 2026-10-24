@@ -102,6 +102,25 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(len({item["channel"] for item in catalog}), len(catalog))
         self.assertTrue({"can0", "can1"}.issubset({item["bus"] for item in catalog}))
 
+    def test_live_signal_selection_keeps_timestamp_in_plot_data(self):
+        # Grafana's LiveDataStream applies filter.fields to all fields by name;
+        # it does not automatically preserve fields whose type is time.
+        for panel in live_dashboard()["panels"]:
+            if panel["type"] != "timeseries":
+                continue
+            for target in panel["targets"]:
+                selected = target.get("filter", {}).get("fields")
+                if not selected:
+                    continue
+                signals = [name for name in selected if name.startswith(("signal.", "derived."))]
+                for timestamp_name in ("time", "Time"):
+                    with self.subTest(panel=panel["title"], query=target["refId"], time=timestamp_name):
+                        schema = [(timestamp_name, "time"), ("seq", "number")]
+                        schema.extend((name, "number") for name in signals)
+                        visible = [(name, kind) for name, kind in schema if name in selected]
+                        self.assertTrue(any(kind == "time" for _, kind in visible))
+                        self.assertEqual([name for name, kind in visible if kind == "number"], signals)
+
     def test_http_push_auth_and_synthetic_namespace(self):
         requests = []
 

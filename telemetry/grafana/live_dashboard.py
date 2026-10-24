@@ -42,7 +42,9 @@ def _target(namespace, channel, *, fields=None):
               "queryType": "measurements", "channel": f"stream/{namespace}/{channel}",
               "buffer": 60000}
     if fields:
-        target["filter"] = {"fields": fields}
+        # Grafana Live filters every field by name, including the timestamp.
+        # Retain both timestamp spellings supported by our Live views.
+        target["filter"] = {"fields": list(dict.fromkeys(["time", "Time", *fields]))}
     return target
 
 
@@ -140,20 +142,49 @@ def live_dashboard():
                            {"id": "color", "value": {"mode": "fixed", "fixedColor": color}}],
         })
     panels.append(launch)
+    speed_sources = [
+        ("can0", "BMS-Inverter-Only.dbc", "INV_Motor_Speed", "Inverter motor RPM", "#5794F2"),
+        ("can1", "DAQ-Firmware.dbc", "DBL_WSPD_BL_RPM", "Rear-left wheel RPM", "#FF9830"),
+        ("can1", "DAQ-Firmware.dbc", "DBR_WSPD_BR_RPM", "Rear-right wheel RPM", "#73BF69"),
+    ]
+    speed_targets, speed_overrides = [], []
+    for index, (bus, dbc, signal, label, color) in enumerate(speed_sources):
+        message = next(item for item in catalog if item["bus"] == bus and
+                       item["dbc"] == dbc and signal in item["signals"])
+        speed_targets.append({
+            **_target(namespace, message["channel"], fields=[f"signal.{signal}"]),
+            "refId": chr(ord("A") + index),
+        })
+        speed_overrides.append({
+            "matcher": {"id": "byRegexp", "options": f"^signal\\.{signal}(?: .*)?$"},
+            "properties": [{"id": "displayName", "value": label},
+                           {"id": "color", "value": {"mode": "fixed", "fixedColor": color}}],
+        })
+    speeds = _panel(10, "Inverter motor and rear wheel RPM",
+                    {"x": 0, "y": 21, "w": 24, "h": 7}, speed_targets[0],
+                    unit="suffix:RPM")
+    speeds["targets"] = speed_targets
+    speeds["fieldConfig"]["overrides"] = speed_overrides
+    speeds["fieldConfig"]["defaults"]["decimals"] = 0
+    speeds["description"] += (
+        " Raw inverter motor-shaft RPM and rear-left/rear-right wheel RPM on one "
+        "axis, with no gearing correction. Signed values are preserved. Check "
+        "the DAQ rear-wheel Valid and Timeout signals when assessing wheel readings.")
+    panels.append(speeds)
     selected = _panel(5, "Selected message — decoded samples",
-                      {"x": 0, "y": 21, "w": 16, "h": 9},
+                      {"x": 0, "y": 28, "w": 16, "h": 9},
                       _target(namespace, "${can_message}"))
     selected["transformations"] = [{"id": "filterFieldsByName", "options": {
         "include": {"pattern": "^(Time|time|signal\\..*)$"}}}]
     panels.append(selected)
     values = _panel(6, "Selected message — latest values",
-                    {"x": 16, "y": 21, "w": 8, "h": 9},
+                    {"x": 16, "y": 28, "w": 8, "h": 9},
                     _target(namespace, "${can_message}"), kind="table")
     values["transformations"] = [{"id": "reduce", "options": {
         "reducers": ["lastNotNull"], "mode": "seriesToRows"}}]
     panels.append(values)
     panels.append(_panel(7, "Live CAN frames — recent arrivals",
-                         {"x": 0, "y": 30, "w": 24, "h": 10},
+                         {"x": 0, "y": 37, "w": 24, "h": 10},
                          _target(namespace, "can_frames"), kind="table"))
     dashboard = _dashboard("trevcan-live-telemetry", "TREVCAN - Live Telemetry",
                            "Streaming decoded CAN samples and raw frames. No InfluxDB polling. "
