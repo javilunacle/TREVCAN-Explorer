@@ -9,19 +9,93 @@ configured separately on the car Pi.
 
 | Role | Address | Account | Purpose |
 | --- | --- | --- | --- |
-| Car Pi | `192.168.0.145` | `trevor` | Reads SocketCAN `can0` and `can1`, then streams raw frames |
-| Telemetry Pi | `192.168.0.136` | `pi` | Receives/ACKs frames, decodes DBCs, runs InfluxDB, Grafana, and test controls |
+| Car Pi | `192.168.0.145` | `trevor` | Receives CANManager raw/decoded pairs, then streams frames |
+| Telemetry Pi | `192.168.0.136` | `pi` | Receives/ACKs frames, calculates once, runs InfluxDB, Grafana, and test controls |
 
 ```text
 car can0/can1
-  -> short RAM batch
+  -> dashboard CANManager: decode once + update dashboard shared_data
+  -> local Unix datagrams: raw frame + decoded signal dictionary
+  -> short RAM batch (CarBuffer assigns sequence numbers)
   -> authenticated TCP batches
-  -> telemetry-Pi RAM acceptance + ACK
-  -> independent downstream workers:
-       live: bus-aware DBC decoding -> small Grafana Live batches -> live viewers
-       history: every raw/decoded sample + source-time transforms -> InfluxDB
-                                                               -> historical viewers
+  -> telemetry-Pi validation + duplicate rejection
+  -> process_frame(): calculate once from supplied decoded values
+  -> RAM acceptance ACK + independent output workers:
+       live: raw/decoded/calculated samples -> Grafana Live -> live viewers
+       history: the same samples -> InfluxDB -> historical viewers and CSV exports
 ```
+
+The car service now uses `--canmanager-socket`. The dashboard's `CANManager`
+owns SocketCAN and must be running to supply frames; telemetry keeps its own
+process, bounded RAM buffer, batching, ACK handling, and TCP sender. Each outgoing
+frame retains the original raw fields and adds `decoded`, `dbc`, `message`, and
+choice `labels`. The receiver uses this result directly, including an empty
+decoded dictionary for unknown frames. Standalone raw-only inputs still decode
+once on receipt. No decode-status field or SQLite storage is introduced.
+
+Each sender run has a new `stream_id`, paired with its sequence numbers. This
+identifies a capture stream rather than a physical car, so restarting the sender
+can safely restart sequences at 1. `--stream-id PREFIX` optionally labels a run;
+the sender still adds a unique suffix. Update the sender and receiver together
+when installing this field rename. The existing InfluxDB/Grafana tag named `car`
+continues to store this stream ID to preserve historical queries and dashboards.
+
+The default is the Linux abstract Unix datagram socket `trevcan-telemetry`.
+There is no socket file to clean up. Either process can start first; while
+telemetry is stopped or busy, CANManager drops the telemetry copy and continues
+updating the dashboard. Set `TREVCAN_TELEMETRY_SOCKET` to the same name in both
+processes to override it. A manual sender can be started with:
+
+```bash
+python3 -m telemetry.car --canmanager-socket --host 192.168.0.136
+```
+
+Keep the existing `TELEMETRY_TOKEN` configuration. For standalone diagnostics,
+`--interface can0 --interface can1` still selects direct raw-only SocketCAN
+capture. Replay and synthetic inputs are unchanged. The installed car service
+selects the CANManager input; reinstall it when updating an existing car Pi.
+
+The car dashboard uses the `caleb_rewind` layout (`python3 -m app.main`).
+Its existing editor and `config/dbc_catalog.json` select DBCs per bus, including
+their duplicate-ID priorities and reload behavior. CANManager decodes numeric
+values once, derives enum display labels by lookup, and forwards both. Non-finite
+decoded floats become JSON `null` on the wire; dashboard values are unchanged.
+
+The dashboard speed gauge and telemetry speed calculations both use
+`VCU.dbc / VCU_Summary / VCU_Speed_MPH`, scaled at 0.01 mph per raw count.
+The previous `DAQBus.dbc / VCU_Speed` mismatch does not apply to this version.
+
+Calculated sources must match the car's actual decoded signal names, units,
+DBC filenames, and buses. The checked-in can0 catalog gives `hvc-2.dbc` and
+`master.dbc` equal priority, so master loads later and overrides HVC definitions.
+Its `HVC_IO_Current` publishes `HVC_Pack_Current_Hi` and
+`HVC_Pack_Current_Lo` in A, and its pack voltage is already in V.
+
+The dashboard's `hvc-2.dbc` and can1 `hvc.dbc` use mA/mV. The telemetry reference
+`dbc_files/hvc.dbc` describes a different current payload with a combined
+`HVC_Pack_Current_A` signal. The car requires a confirmed rule combining its
+Hi/Lo readings before aligning the electrical bindings. Convert mA/mV to
+A/V only for inputs that use those units.
+
+CANManager's car catalog also includes the unchanged
+`BMS-Firmware-RTOS-Complete.dbc` on `can0` and
+`can9-database-01.09.dbc` on `can1`. A second copy of telemetry's
+`DAQ-Firmware.dbc` loads below the dashboard definitions at priority -1,
+adding seven otherwise missing DAQ message IDs without changing existing
+message selections or gauges. `Inverter.dbc` already matches all 20 messages
+in `BMS-Inverter-Only.dbc`, so it is reused. Historical inverter queries
+accept both filenames; no decoder alias or second decode is required.
+
+Signals do not need a car dashboard gauge to be decoded and forwarded.
+The existing local socket, CarBuffer, and TCP sender carry these additional
+messages without another process or queue. BMS module identity stays with
+each frame through its CAN ID and message name, including when modules reuse
+signal names. Unknown frames retain an empty decoded dictionary and are
+not decoded again.
+
+The pack-current Hi/Lo combination rule is still pending. Both channels are
+forwarded individually; HVC calculation bindings remain unchanged until
+that rule is confirmed.
 
 The default policy is **discard disconnected data and resume fresh**. Neither Pi
 opens a SQLite spool in the active pipeline. ACKs confirm acceptance into RAM,
@@ -118,7 +192,7 @@ docker compose -f docker-compose.telemetry-pi.yml up -d
 ```
 
 Open `http://telemetrypi.local:3000` (or `http://192.168.0.136:3000`) and sign in.
-Under **Administration → Users and access → Service accounts**, create a
+Under **Administration â†’ Users and access â†’ Service accounts**, create a
 `trevcan-live` service account with the **Admin** role and generate a token.
 Set `GRAFANA_LIVE_TOKEN` in the private `.env.telemetry` to that token. This is a
 separate publisher credential; do not put it in dashboard JSON or on the car Pi.
@@ -249,7 +323,7 @@ The test operator does not need SSH:
    that viewer, use `http://192.168.0.136:8080`.
 3. Select **Start Test**. This starts the receiver first, waits for TCP port
    8765, creates/reuses the current analysis session, and then starts the
-   dual-bus car sender.
+   CANManager-fed car sender. The dashboard must already be running on the car.
 4. Select **Open Grafana dashboards** in Telemetry Tools, or open
    `http://telemetrypi.local:3000/dashboards` directly. All provisioned
    dashboards include a **Telemetry tools** link back to TREVCAN Telemetry
@@ -345,13 +419,21 @@ current frames, without trying to recover disconnected data.
 
 ## Historical transform policy
 
-The receiver reads `telemetry/transform_policies.json`. Calculations consume
-every selected decoded update in source-timestamp order; the fast/medium/slow
-policy changes only how often derived points are published to InfluxDB. It does
-not replace the full-sample raw or decoded measurements. The initial publication targets
-are 10 Hz for fast outputs, 5 Hz for medium outputs, and 1 Hz for slow outputs.
-This work runs in the telemetry-Pi export worker after RAM acceptance;
-it adds no transform processing to the car Pi.
+The receiver reads `telemetry/transform_policies.json`. After validation and
+sequence deduplication, `prepare_frame()` uses CANManager's decoded values and
+calls `TransformEngine.process_frame()` once. The engine updates previous
+samples/running totals in RAM and returns ordinary calculated samples. Both
+output workers format those same results; they never decode or calculate again.
+A database outage does not roll back or pause calculation state. A receiver
+restart still resets running totals.
+
+Fast outputs use `publish_period_ms: 0`: every eligible input can produce a
+sample at its original capture timestamp. This is source-driven, not a timer;
+missing or invalid inputs do not produce invented samples. Medium outputs keep
+200 ms minimum spacing (up to 5 Hz), and slow outputs keep 1000 ms spacing (up to
+1 Hz). `max_gap_ms` remains a separate protection against integrating across
+missing inputs. Network batching groups samples without averaging or reducing
+their frequency. All calculation work remains on the telemetry Pi.
 
 The initial policy provides:
 
@@ -379,7 +461,7 @@ warnings are diagnostic engineering aids, not safety alarms or interlocks.
 ## Synthetic end-to-end scenarios
 
 Run synthetic scenarios on the **telemetry Pi**, with the real car test ended.
-They use a unique `scenario-*` car ID and the normal authenticated TCP receiver,
+They use a unique `scenario-*` stream ID and the normal authenticated TCP receiver,
 DBC decoder, transform worker, InfluxDB, and Grafana path. They never open
 SocketCAN and never transmit onto `can0` or `can1`. Normal vehicle dashboards
 exclude their `scenario-*` stream IDs, while **TREVCAN - Historical Synthetic Validation**
@@ -474,8 +556,9 @@ change buffering merely to hide decode warnings.
 
 ### Existing car applications consume high CPU
 
-The telemetry sender passively reads SocketCAN alongside other vehicle
-applications. Do not disable unknown vehicle services without team approval.
+The installed telemetry sender receives the dashboard CANManager's raw/decoded
+records; only standalone `--interface` mode reads SocketCAN independently.
+Do not disable unknown vehicle services without team approval.
 Coordinate with their owners if combined CPU load or temperature affects testing.
 
 ## Updating after code changes

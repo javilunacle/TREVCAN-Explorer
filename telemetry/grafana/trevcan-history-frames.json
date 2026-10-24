@@ -32,9 +32,9 @@
   "panels": [
     {
       "id": 1,
-      "title": "CAN messages: latest value per CAN ID",
+      "title": "CAN messages: recorded frames",
       "type": "table",
-      "description": "One recent row per car, CAN bus, and CAN ID from InfluxDB. A preformatted table field avoids an expensive multi-field Flux pivot.",
+      "description": "Every recorded raw/decoded CAN frame in the selected time range, filtered by DBC and bus.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -52,7 +52,7 @@
             "type": "influxdb",
             "uid": "${DS_INFLUXDB}"
           },
-          "query": "import \"strings\"\n\nfrom(bucket: \"home\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"can_frame\" and r._field == \"table_row\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> last()\n  |> map(fn: (r) => {\n    cells = strings.split(v: r._value, t: \"␟\")\n    return {r with seq: cells[0], dlc: cells[1], data: cells[2], dbc: cells[3], message: cells[4], decoded: cells[5]}\n  })\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 500)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
+          "query": "import \"strings\"\n\nfrom(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"can_frame\" and r._field == \"table_row\")\n  |> filter(fn: (r) => r.bus =~ /^${can_bus:regex}$/)\n  |> map(fn: (r) => {\n    cells = strings.split(v: r._value, t: \"␟\")\n    return {r with seq: cells[0], dlc: cells[1], data: cells[2], dbc: cells[3], message: cells[4], decoded: cells[5]}\n  })\n  |> filter(fn: (r) => r.dbc =~ /^${dbc_file:regex}$/)\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> keep(columns: [\"dbc\", \"message\", \"_time\", \"bus\", \"can_id\", \"data\", \"decoded\", \"dlc\", \"seq\", \"ext\", \"car\"])",
           "rawQuery": true,
           "resultFormat": "table"
         }
@@ -171,13 +171,41 @@
       "5s"
     ],
     "quick_ranges": [
-      {"display": "Last 5 minutes", "from": "now-5m", "to": "now"},
-      {"display": "Last 15 minutes", "from": "now-15m", "to": "now"},
-      {"display": "Last 30 minutes", "from": "now-30m", "to": "now"},
-      {"display": "Last 1 hour", "from": "now-1h", "to": "now"},
-      {"display": "Last 6 hours", "from": "now-6h", "to": "now"},
-      {"display": "Last 12 hours", "from": "now-12h", "to": "now"},
-      {"display": "Last 24 hours", "from": "now-24h", "to": "now"}
+      {
+        "display": "Last 5 minutes",
+        "from": "now-5m",
+        "to": "now"
+      },
+      {
+        "display": "Last 15 minutes",
+        "from": "now-15m",
+        "to": "now"
+      },
+      {
+        "display": "Last 30 minutes",
+        "from": "now-30m",
+        "to": "now"
+      },
+      {
+        "display": "Last 1 hour",
+        "from": "now-1h",
+        "to": "now"
+      },
+      {
+        "display": "Last 6 hours",
+        "from": "now-6h",
+        "to": "now"
+      },
+      {
+        "display": "Last 12 hours",
+        "from": "now-12h",
+        "to": "now"
+      },
+      {
+        "display": "Last 24 hours",
+        "from": "now-24h",
+        "to": "now"
+      }
     ]
   },
   "templating": {

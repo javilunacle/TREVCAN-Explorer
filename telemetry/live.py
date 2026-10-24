@@ -14,9 +14,11 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
+from .common import point_line
+
 
 def live_measurement(bus, can_id, is_extended):
-    """Stable, bus-aware channel path, independent of signal value or car ID."""
+    """Stable, bus-aware channel path, independent of signal value or stream ID."""
     return f"{bus}_{can_id:08x}_{'ext' if is_extended else 'std'}"
 
 
@@ -41,14 +43,24 @@ def _string(value):
                   .replace("\r", " ").replace("\n", " ")) + '"'
 
 
-def live_lines(frames, decoder):
+def live_lines(frames):
     """One raw record and one wide decoded record per CAN sample, without reduction."""
+    # Preserve the existing Grafana "car" field/tag name; its value now comes
+    # from stream_id, consistently with the historical InfluxDB schema.
     lines = []
     for frame in frames:
         if isinstance(frame["data"], str):
             frame = {**frame, "data": bytes.fromhex(frame["data"])}
-        decoded = decoder.decode(frame)
-        dbc, message, signals = decoded if decoded else ("", "Unknown", {})
+        # Reception already resolved this frame's decode and calculations.
+        signals = frame.get("decoded", {})
+        dbc, message = frame.get("dbc", ""), frame.get("message") or "Unknown"
+        labels = frame.get("labels", {})
+        for point in frame.get("calculated", []):
+            if point["measurement"] == "telemetry_derived":
+                # One stable channel per calculated signal, with a numeric
+                # `value` field that can be selected directly in a Live panel.
+                point = {**point, "measurement": f"derived_{point['tags']['signal']}"}
+            lines.append(point_line(point))
         bus = frame.get("bus", "unknown")
         fields = [f"seq={frame['seq']}i", f"dlc={frame['dlc']}i",
                   f"data={_string(frame['data'].hex().upper())}",
@@ -56,20 +68,21 @@ def live_lines(frames, decoder):
                   f"remote={str(frame['is_remote']).lower()}",
                   f"fd={str(frame['is_fd']).lower()}",
                   f"error={str(frame['is_error']).lower()}"]
-        summary = "; ".join(f"{name}={value}" for name, value in signals.items())
+        summary = "; ".join(
+            f"{name}={labels[name]} ({value})" if name in labels else f"{name}={value}"
+            for name, value in signals.items())
         can_id = f"0x{frame['can_id']:X}"
         lines.append(
-            f"can_frames car={_string(frame['car_id'])},bus={_string(bus)},"
+            f"can_frames car={_string(frame['stream_id'])},bus={_string(bus)},"
             f"can_id={_string(can_id)},dbc={_string(dbc)},"
             f"message={_string(message)},decoded={_string(summary)},"
             f"{','.join(fields)} {frame['timestamp_ns']}")
-        if decoded is None:
+        if not signals:
             continue
         signal_fields = []
         for name, value in signals.items():
-            if hasattr(value, "name") and hasattr(value, "value"):
-                signal_fields.append(f"{_tag('state.' + name)}={_string(value.name)}")
-                value = value.value
+            if name in labels:
+                signal_fields.append(f"{_tag('state.' + name)}={_string(labels[name])}")
             if isinstance(value, (int, float)):
                 number = float(value)
                 if math.isfinite(number):
@@ -79,7 +92,7 @@ def live_lines(frames, decoder):
         if signal_fields:
             measurement = live_measurement(bus, frame["can_id"], frame["is_extended"])
             lines.append(
-                f"{measurement},car={_tag(frame['car_id'])} "
+                f"{measurement},car={_tag(frame['stream_id'])} "
                 f"{','.join(signal_fields)} {frame['timestamp_ns']}")
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -129,9 +142,8 @@ class GrafanaHTTPClient:
 
 
 class GrafanaLivePublisher:
-    def __init__(self, decoder, url, token, *, flush_seconds=0.02,
+    def __init__(self, url, token, *, flush_seconds=0.02,
                  batch_size=256, queue_size=8192, max_age_seconds=2):
-        self.decoder = decoder
         self.client = GrafanaHTTPClient(url, token)
         self.flush_seconds = flush_seconds
         self.batch_size = batch_size
@@ -163,11 +175,11 @@ class GrafanaLivePublisher:
         # Synthetic validation must never enter the normal vehicle channels.
         for synthetic in (False, True):
             selected = [frame for frame in fresh
-                        if frame["car_id"].startswith("scenario-") == synthetic]
+                        if frame["stream_id"].startswith("scenario-") == synthetic]
             if not selected:
                 continue
             try:
-                self.client.post(live_lines(selected, self.decoder), synthetic=synthetic)
+                self.client.post(live_lines(selected), synthetic=synthetic)
                 sent += len(selected)
             except Exception as exc:
                 failed += len(selected)

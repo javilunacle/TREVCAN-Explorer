@@ -1,10 +1,13 @@
 """Readable, read-only Grafana dashboards for the off-car telemetry stack.
 
 These dashboards provide historical monitoring views. They use
-the bus-specific DBC routing configured by ``telemetry/start_server_pi.sh``.
+CANManager's supplied source identities for car frames. Raw-only diagnostic
+inputs retain the receiver's separate DBC routing.
 """
 
 DATASOURCE = {"type": "influxdb", "uid": "trevcan-influxdb"}
+# CANManager uses Inverter.dbc; keep earlier receiver-decoded history visible.
+INVERTER_DBCS = ("Inverter.dbc", "BMS-Inverter-Only.dbc")
 REFRESH_INTERVALS = ["1s", "2s", "5s"]
 QUICK_RANGES = [
     {"display": "Last 5 minutes", "from": "now-5m", "to": "now"},
@@ -34,7 +37,10 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False,
         f"({condition})",
     ]
     if dbc:
-        filters.append(f'r.dbc == "{dbc}"')
+        # Most panels use one source file. The inverter accepts both filenames
+        # because the same definitions were previously decoded on the receiver.
+        filenames = (dbc,) if isinstance(dbc, str) else dbc
+        filters.append("(" + " or ".join(f'r.dbc == "{name}"' for name in filenames) + ")")
     query = (
         'from(bucket: "home")\n'
         '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
@@ -473,7 +479,7 @@ def overview_dashboard():
         timeseries(
             9, "Inverter torque",
             'r.signal == "INV_Commanded_Torque" or r.signal == "INV_Torque_Feedback"',
-            {"x": 0, "y": 12, "w": 8, "h": 8}, dbc="BMS-Inverter-Only.dbc",
+            {"x": 0, "y": 12, "w": 8, "h": 8}, dbc=INVERTER_DBCS,
             unit="suffix:Nm",
         ),
         timeseries(
@@ -511,7 +517,7 @@ def overview_dashboard():
 
 
 def inverter_dashboard():
-    dbc = "BMS-Inverter-Only.dbc"
+    dbc = INVERTER_DBCS
     panels = [
         stat(1, "Motor speed", "INV_Motor_Speed", {"x": 0, "y": 0, "w": 4, "h": 4},
              dbc=dbc, unit="suffix:RPM", decimals=0),

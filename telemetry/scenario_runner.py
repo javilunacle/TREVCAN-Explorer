@@ -313,11 +313,11 @@ async def run_scenario(scenario, buffer, host, port, token, timeout_seconds):
             await asyncio.wait_for(sender, 3)
 
 
-def _query_influx(host, port, token, org, bucket, car_id):
+def _query_influx(host, port, token, org, bucket, stream_id):
     flux = (
         f"from(bucket: {json.dumps(bucket)})\n"
         "  |> range(start: -10m)\n"
-        f"  |> filter(fn: (r) => r.car == {json.dumps(car_id)})\n"
+        f"  |> filter(fn: (r) => r.car == {json.dumps(stream_id)})\n"
         "  |> keep(columns: [\"_measurement\", \"_field\", \"_value\", "
         "\"signal\", \"rule\", \"severity\", \"message\", \"dbc\"])"
     )
@@ -331,13 +331,13 @@ def _query_influx(host, port, token, org, bucket, car_id):
         return response.read().decode("utf-8")
 
 
-async def verify_scenario(scenario, car_id, host, port, token, org, bucket,
+async def verify_scenario(scenario, stream_id, host, port, token, org, bucket,
                           timeout_seconds):
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     body = ""
     while asyncio.get_running_loop().time() < deadline:
         body = await asyncio.to_thread(
-            _query_influx, host, port, token, org, bucket, car_id)
+            _query_influx, host, port, token, org, bucket, stream_id)
         if all(item in body for item in scenario.expected):
             break
         await asyncio.sleep(0.25)
@@ -372,7 +372,7 @@ def main():
     parser.add_argument("--port", type=int, default=8765, help="telemetry receiver port")
     parser.add_argument("--token", default=os.getenv("TELEMETRY_TOKEN"),
                         help="receiver token (default: TELEMETRY_TOKEN)")
-    parser.add_argument("--car-id", help="test stream ID; default is unique per run")
+    parser.add_argument("--stream-id", help="test stream prefix; each run adds a unique suffix")
     parser.add_argument("--timeout", type=float, default=15,
                         help="seconds allowed for sender drain and verification")
     parser.add_argument("--verify", action="store_true",
@@ -401,11 +401,11 @@ def main():
         parser.error("--timeout must be positive")
 
     scenario = scenarios[args.scenario]
-    car_id = args.car_id or (
+    stream_id = args.stream_id or (
         f"scenario-{scenario.name}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}")
-    buffer = CarBuffer(car_id)
-    car_id = buffer.car_id
-    print(json.dumps({"scenario": scenario.name, "car_id": car_id,
+    buffer = CarBuffer(stream_id)
+    stream_id = buffer.stream_id
+    print(json.dumps({"scenario": scenario.name, "stream_id": stream_id,
                       "frames": len(scenario.events), "receiver": f"{args.host}:{args.port}",
                       "socketcan": "not used"}, indent=2), flush=True)
     try:
@@ -413,9 +413,9 @@ def main():
             scenario, buffer, args.host, args.port, args.token, args.timeout))
         if args.verify:
             asyncio.run(verify_scenario(
-                scenario, car_id, args.influx_host, args.influx_port,
+                scenario, stream_id, args.influx_host, args.influx_port,
                 args.influx_token, args.org, args.bucket, args.timeout))
-        print(f"PASS: {scenario.name} ({car_id})", flush=True)
+        print(f"PASS: {scenario.name} ({stream_id})", flush=True)
     except (OSError, TimeoutError, RuntimeError, ValueError) as exc:
         parser.exit(1, f"FAIL: {scenario.name}: {exc}\n")
     finally:

@@ -3,7 +3,7 @@
   "current_positive_direction": "charge",
   "policies": {
     "fast": {
-      "publish_period_ms": 100,
+      "publish_period_ms": 0,
       "max_gap_ms": 500
     },
     "medium": {
@@ -26,7 +26,10 @@
   "speed_deadband_mph": 0.1,
   "electrical_pair_max_age_ms": 200,
   "imu_alignment": {
-    "accepted_status_values": [2, 3],
+    "accepted_status_values": [
+      2,
+      3
+    ],
     "max_age_ms": 5000
   },
   "temperature_spike": {
@@ -37,7 +40,10 @@
   },
   "sources": {
     "vehicle_speed": {
-      "buses": ["can0", "can1"],
+      "buses": [
+        "can0",
+        "can1"
+      ],
       "dbc": "VCU.dbc",
       "message": "VCU_Summary",
       "signal": "VCU_Speed_MPH"

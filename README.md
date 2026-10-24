@@ -4,12 +4,12 @@ Vehicle telemetry from the car Pi to a telemetry Pi, with Grafana Live for
 current samples and InfluxDB for historical analysis.
 
 ```text
-Car Pi: can0/can1 -> small RAM batches -> authenticated TCP
-                                             |
-Telemetry Pi: decode DBC signals -------------+
-                 |                           |
-                 v                           v
-            Grafana Live              InfluxDB history
+Car Pi: CANManager decode -> dashboard + raw/decoded TCP records
+                                               |
+Telemetry Pi: process_frame() calculates once --+
+                 |                             |
+                 v                             v
+            Grafana Live                InfluxDB history
 ```
 
 Disconnected data is discarded. Both Pis use bounded RAM buffers and resume
@@ -21,7 +21,7 @@ Setup and test-day operation are documented in [telemetry/README.md](telemetry/R
 ## Repository layout
 
 - `telemetry/car.py`: multi-bus SocketCAN capture and sender.
-- `telemetry/server.py`: receiver, DBC decoding, and historical export.
+- `telemetry/server.py`: receiver, one-time preparation, and historical export.
 - `telemetry/live.py`: independent Grafana Live publisher.
 - `telemetry/buffers.py`: bounded RAM queues.
 - `telemetry/dbc_files/`: CAN message definitions.
@@ -44,10 +44,10 @@ Installers leave boot startup disabled by default.
 
 ## Local validation
 
-No CAN adapter, Grafana, or InfluxDB instance is needed for the tests:
+Render dashboard definitions and list available scenarios without CAN hardware
+or running database services:
 
 ```bash
-python -m unittest discover -s telemetry -t .
 python -m telemetry.grafana.render_provisioned
 python -m telemetry.scenario_runner --list
 ```

@@ -6,20 +6,32 @@ from pathlib import Path
 import cantools
 
 from telemetry.live import live_measurement, stream_namespace
-from telemetry.grafana.dashboard_specs import _dashboard
+from telemetry.grafana.dashboard_specs import _custom_variable, _dashboard
 
 
 LIVE_DATASOURCE = {"type": "grafana", "uid": "grafana"}
 DBC_DIRECTORY = Path(__file__).resolve().parents[1] / "dbc_files"
 BUS_DBCS = {
-    "can0": ["BMS-Firmware-RTOS-Complete.dbc", "hvc.dbc", "VCU.dbc",
-             "BMS-Inverter-Only.dbc", "Baby_MOBO.dbc"],
+    # On the car, Inverter.dbc wins the shared inverter-command ID on can0.
+    "can0": ["BMS-Firmware-RTOS-Complete.dbc", "hvc.dbc", "BMS-Inverter-Only.dbc",
+             "VCU.dbc", "Baby_MOBO.dbc"],
     "can1": ["DAQ-Firmware.dbc", "VCU.dbc", "can9-database-01.09.dbc"],
 }
 
 
+# These names are the engine's public outputs. Each has a stable Live channel;
+# selecting one changes the graph subscription without querying InfluxDB.
+CALCULATED_SIGNALS = (
+    "Vehicle_Speed_mps", "Vehicle_Accel_From_Speed_mps2", "Distance_m",
+    "Pack_Power_W", "Charge_Added_Ah", "Charge_Removed_Ah",
+    "Energy_Charged_Wh", "Energy_Used_Wh", "Net_Energy_Change_Wh",
+    "Accumulator_Temp_Rise_C_per_s", "IMU_Alignment_Valid",
+    "Longitudinal_Accel_g", "Lateral_Accel_g", "Combined_Accel_g",
+)
+
+
 def channel_catalog():
-    """Match receiver DBC priority; identical CAN IDs on different buses stay separate."""
+    """Build reference selectors; actual values come from CANManager frames."""
     catalog = {}
     databases = {}
     for bus, filenames in BUS_DBCS.items():
@@ -29,8 +41,11 @@ def channel_catalog():
                     DBC_DIRECTORY / filename, strict=False)
             for message in databases[filename].messages:
                 channel = live_measurement(bus, message.frame_id, message.is_extended_frame)
+                # These inverter definitions match CANManager exactly; use
+                # its source filename in selector labels. Channels stay bus/ID based.
+                source = "Inverter.dbc" if filename == "BMS-Inverter-Only.dbc" else filename
                 catalog.setdefault(channel, {
-                    "bus": bus, "dbc": filename, "message": message.name,
+                    "bus": bus, "dbc": source, "message": message.name,
                     "signals": {signal.name for signal in message.signals},
                     "channel": channel,
                 })
@@ -91,29 +106,39 @@ def live_dashboard():
     for index, (title, signal, dbc, unit) in enumerate(overview):
         message = next(item for item in catalog if item["bus"] == "can0" and
                        item["dbc"] == dbc and signal in item["signals"])
+        fields = [f"signal.{signal}"]
         panels.append(_panel(index + 1, title,
                              {"x": (index % 2) * 12, "y": (index // 2) * 7, "w": 12, "h": 7},
-                             _target(namespace, message["channel"], fields=[f"signal.{signal}"]),
+                             _target(namespace, message["channel"], fields=fields),
                              unit=unit))
-    selected = _panel(5, "Selected message — decoded samples",
+    selected = _panel(5, "Selected message â€” decoded samples",
                       {"x": 0, "y": 14, "w": 16, "h": 9},
                       _target(namespace, "${can_message}"))
     selected["transformations"] = [{"id": "filterFieldsByName", "options": {
         "include": {"pattern": "^(Time|time|signal\\..*)$"}}}]
     panels.append(selected)
-    values = _panel(6, "Selected message — latest values",
+    values = _panel(6, "Selected message â€” latest values",
                     {"x": 16, "y": 14, "w": 8, "h": 9},
                     _target(namespace, "${can_message}"), kind="table")
     values["transformations"] = [{"id": "reduce", "options": {
         "reducers": ["lastNotNull"], "mode": "seriesToRows"}}]
     panels.append(values)
-    panels.append(_panel(7, "Live CAN frames — recent arrivals",
+    panels.append(_panel(7, "Live CAN frames â€” recent arrivals",
                          {"x": 0, "y": 23, "w": 24, "h": 10},
                          _target(namespace, "can_frames"), kind="table"))
+    calculated = _panel(8, "Selected calculated signal",
+                        {"x": 0, "y": 33, "w": 24, "h": 9},
+                        _target(namespace, "derived_${calculated_signal}", fields=["value"]))
+    calculated["description"] = (
+        "Calculated values use source capture timestamps. Fast signals update "
+        "on each eligible input; other signals follow their publication policy.")
+    panels.append(calculated)
+    calculated_variable = _custom_variable(
+        "calculated_signal", "Calculated signal", CALCULATED_SIGNALS, "Vehicle_Speed_mps")
     dashboard = _dashboard("trevcan-live-telemetry", "TREVCAN - Live Telemetry",
                            "Streaming decoded CAN samples and raw frames. No InfluxDB polling. "
                            "Synthetic scenarios use separate channels.", panels,
-                           variables=[variable])
+                           variables=[variable, calculated_variable])
     dashboard["refresh"] = ""
     dashboard["liveNow"] = True
     dashboard["time"] = {"from": "now-1m", "to": "now"}

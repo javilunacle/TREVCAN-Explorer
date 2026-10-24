@@ -1,10 +1,8 @@
-"""Policy-driven live telemetry transforms for the telemetry Pi.
+"""Calculate from each decoded input and return samples for both outputs.
 
-The transform engine consumes decoded frames in source-timestamp order.  It
-calculates from every selected update, while rate-limiting only the points sent
-to InfluxDB. ``prepare`` never mutates committed state: callers apply the
-returned state only after the matching Influx write succeeds. The active
-receiver keeps this state in RAM; process restarts reset running totals.
+The receiver calls process_frame once for each newly accepted frame. Previous
+samples and running totals live in RAM and advance independently of network
+writes. Output workers handle batching and formatting for Live and InfluxDB.
 """
 
 from __future__ import annotations
@@ -15,18 +13,8 @@ import math
 import os
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-
-
-def _escape_tag(value):
-    return (str(value).replace("\\", "\\\\").replace(" ", "\\ ")
-            .replace(",", "\\,").replace("=", "\\="))
-
-
-def _escape_field(value):
-    return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _numeric(value):
@@ -35,7 +23,8 @@ def _numeric(value):
     if isinstance(value, bool):
         return float(int(value))
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     return None
 
 
@@ -143,14 +132,6 @@ class SessionRegistry:
         return "unassigned"
 
 
-@dataclass
-class TransformPlan:
-    lines: list[str]
-    states: dict[tuple[str, str, str], dict]
-
-    def line_protocol(self):
-        return "\n".join(self.lines) + ("\n" if self.lines else "")
-
 class TransformEngine:
     """Apply the initial TREVCAN live-analysis policy set."""
 
@@ -161,7 +142,7 @@ class TransformEngine:
         self.policy = json.loads(self.policy_path.read_text(encoding="utf-8"))
         self._validate_policy()
         self.sessions = SessionRegistry(session_file)
-        self._committed = {}
+        self._states = {}
         self._signal_sources = {}
         self._message_sources = {}
         for source_name, source in self.policy["sources"].items():
@@ -169,7 +150,7 @@ class TransformEngine:
             for bus in buses:
                 message_key = (bus, source.get("dbc"), source.get("message"))
                 if "signal" in source:
-                    self._signal_sources[message_key + (source["signal"],)] = source_name
+                    self._signal_sources.setdefault(message_key, {})[source["signal"]] = source_name
                 else:
                     self._message_sources[message_key] = source_name
 
@@ -190,6 +171,13 @@ class TransformEngine:
         for name in ("fast", "medium", "slow", "event"):
             if name not in self.policy["policies"]:
                 raise ValueError(f"transform policy missing policy {name}")
+            settings = self.policy["policies"][name]
+            for field, allow_zero in (("publish_period_ms", True), ("max_gap_ms", False)):
+                value = settings.get(field)
+                if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                        or not math.isfinite(value) or value < 0
+                        or (not allow_zero and value == 0)):
+                    raise ValueError(f"invalid {name}.{field}")
 
     def _new_state(self):
         return {
@@ -210,14 +198,13 @@ class TransformEngine:
             "imu": {"alignment_valid": False, "alignment_t": None},
         }
 
-    def _state(self, work, session_id, car_id):
-        key = (session_id, car_id, self.STATE_NAME)
-        if key not in work:
-            committed = self._committed.get(key)
-            if not isinstance(committed, dict) or committed.get("policy_version") != 1:
-                committed = self._new_state()
-            work[key] = copy.deepcopy(committed)
-        return work[key]
+    def _state(self, session_id, stream_id):
+        # One state per sender run and test session. No proposed/committed copies
+        # are needed because each input is processed once, before output fan-out.
+        key = (session_id, stream_id, self.STATE_NAME)
+        if key not in self._states:
+            self._states[key] = self._new_state()
+        return self._states[key]
 
     def _period_ns(self, policy_name):
         return int(self.policy["policies"][policy_name]["publish_period_ms"] * 1_000_000)
@@ -227,51 +214,65 @@ class TransformEngine:
 
     def _should_emit(self, state, name, timestamp_ns, policy_name):
         previous = state["last_emit"].get(name)
+        # Zero means publish on every eligible input, at the source's cadence.
+        # Positive periods still limit medium/slow outputs without skipping math.
         period = self._period_ns(policy_name)
         if previous is not None and timestamp_ns - previous < period:
             return False
         state["last_emit"][name] = timestamp_ns
         return True
 
-    def _derived(self, lines, state, *, car_id, session_id, timestamp_ns,
+    def _derived(self, points, state, *, stream_id, session_id, timestamp_ns,
                  signal, value, unit, policy, source, force=False):
         if not force and not self._should_emit(state, signal, timestamp_ns, policy):
             return
-        tags = (
-            f"car={_escape_tag(car_id)},session={_escape_tag(session_id)},"
-            f"policy={_escape_tag(policy)},signal={_escape_tag(signal)},"
-            f"unit={_escape_tag(unit)},source={_escape_tag(source)}"
-        )
-        lines.append(
-            f'telemetry_derived,{tags} value={float(value)},quality="good" {timestamp_ns}')
+        # Keep the historical "car" tag: its value identifies this sender run.
+        points.append({
+            "measurement": "telemetry_derived",
+            "tags": {"car": stream_id, "session": session_id, "policy": policy,
+                     "signal": signal, "unit": unit, "source": source},
+            "fields": {"value": float(value), "quality": "good"},
+            "timestamp_ns": timestamp_ns,
+        })
 
-    def _event(self, lines, *, car_id, session_id, timestamp_ns, rule, signal,
+    def _event(self, points, *, stream_id, session_id, timestamp_ns, rule, signal,
                severity, message, fields):
-        tags = (
-            f"car={_escape_tag(car_id)},session={_escape_tag(session_id)},"
-            f"severity={_escape_tag(severity)},rule={_escape_tag(rule)},"
-            f"signal={_escape_tag(signal)}"
-        )
-        values = [f'message="{_escape_field(message)}"']
-        values.extend(f"{name}={float(value)}" for name, value in fields.items())
-        lines.append(f"telemetry_event,{tags} {','.join(values)} {timestamp_ns}")
+        points.append({
+            "measurement": "telemetry_event",
+            "tags": {"car": stream_id, "session": session_id,
+                     "severity": severity, "rule": rule, "signal": signal},
+            "fields": {"message": message,
+                       **{name: float(value) for name, value in fields.items()}},
+            "timestamp_ns": timestamp_ns,
+        })
 
     @staticmethod
     def _slope(window):
-        if len(window) < 2:
+        """Fit a slope without allocating another copy of the sample window."""
+        count = len(window)
+        if count < 2:
             return None
+
+        # Relative seconds preserve precision when capture times are large.
+        # First find the means, then fit around them to avoid cancellation.
         origin = window[0][0]
-        points = [((timestamp - origin) / 1_000_000_000, value)
-                  for timestamp, value in window]
-        mean_t = sum(item[0] for item in points) / len(points)
-        mean_v = sum(item[1] for item in points) / len(points)
-        denominator = sum((timestamp - mean_t) ** 2 for timestamp, _ in points)
+        sum_time = sum_value = 0.0
+        for timestamp, value in window:
+            sum_time += (timestamp - origin) / 1_000_000_000
+            sum_value += value
+        mean_time = sum_time / count
+        mean_value = sum_value / count
+
+        numerator = denominator = 0.0
+        for timestamp, value in window:
+            centered_time = (timestamp - origin) / 1_000_000_000 - mean_time
+            numerator += centered_time * (value - mean_value)
+            denominator += centered_time * centered_time
         if denominator <= 0:
             return None
-        return sum((timestamp - mean_t) * (value - mean_v)
-                   for timestamp, value in points) / denominator
+        return numerator / denominator
 
-    def _handle_speed(self, lines, state, frame, value, session_id):
+    def _handle_speed(self, points, state, frame, value, session_id, signal_name):
         timestamp = frame["timestamp_ns"]
         # Preserve the decoded source signal, but prevent a stationary one-LSB
         # speed flicker from accumulating false distance or acceleration.
@@ -292,21 +293,21 @@ class TransformEngine:
                            if sample[0] >= timestamp - window_ns and sample[0] < timestamp]
         speed["window"].append([timestamp, speed_mps])
         acceleration = self._slope(speed["window"])
-        common = {"car_id": frame["car_id"], "session_id": session_id,
+        common = {"stream_id": frame["stream_id"], "session_id": session_id,
                   "timestamp_ns": timestamp}
-        self._derived(lines, state, **common, signal="Vehicle_Speed_mps",
+        self._derived(points, state, **common, signal="Vehicle_Speed_mps",
                       value=speed_mps, unit="m/s", policy="fast",
-                      source="VCU_Speed_MPH")
-        self._derived(lines, state, **common, signal="Distance_m",
+                      source=signal_name)
+        self._derived(points, state, **common, signal="Distance_m",
                       value=speed["distance_m"], unit="m", policy="medium",
-                      source="VCU_Speed_MPH")
+                      source=signal_name)
         if acceleration is not None:
-            self._derived(lines, state, **common,
+            self._derived(points, state, **common,
                           signal="Vehicle_Accel_From_Speed_mps2",
                           value=acceleration, unit="m/s^2", policy="fast",
-                          source="VCU_Speed_MPH")
+                          source=signal_name)
 
-    def _handle_temperature(self, lines, state, frame, value, session_id):
+    def _handle_temperature(self, points, state, frame, value, session_id):
         timestamp = frame["timestamp_ns"]
         temperature = state["temperature"]
         derivative_ns = int(
@@ -328,7 +329,7 @@ class TransformEngine:
             if (abs(delta) >= float(spike["delta_c"]) and
                     (last_warning is None or timestamp - last_warning >= cooldown_ns)):
                 self._event(
-                    lines, car_id=frame["car_id"], session_id=session_id,
+                    points, stream_id=frame["stream_id"], session_id=session_id,
                     timestamp_ns=timestamp, rule="temperature_spike",
                     signal="HVC_Acc_Temp_Max_C", severity="warning",
                     message=(f"Accumulator maximum temperature changed {delta:+.1f} degC "
@@ -343,7 +344,7 @@ class TransformEngine:
         slope = self._slope(slope_window)
         if slope is not None:
             self._derived(
-                lines, state, car_id=frame["car_id"], session_id=session_id,
+                points, state, stream_id=frame["stream_id"], session_id=session_id,
                 timestamp_ns=timestamp, signal="Accumulator_Temp_Rise_C_per_s",
                 value=slope, unit="degC/s", policy="slow",
                 source="HVC_Acc_Temp_Max_C")
@@ -371,6 +372,8 @@ class TransformEngine:
         return positive, negative, signed
 
     def _handle_current(self, state, timestamp, value):
+        # Integrate adjacent current samples using their capture times. Gaps
+        # above the policy limit start a new interval instead of inventing data.
         electrical = state["electrical"]
         previous_t, previous = electrical["last_current_t"], electrical["last_current"]
         if previous_t is not None and timestamp > previous_t:
@@ -388,7 +391,7 @@ class TransformEngine:
             electrical["last_current_t"], electrical["last_current"] = timestamp, value
             electrical["current_t"], electrical["current"] = timestamp, value
 
-    def _handle_electrical(self, lines, state, frame, source_name, value, session_id):
+    def _handle_electrical(self, points, state, frame, source_name, value, session_id):
         timestamp = frame["timestamp_ns"]
         electrical = state["electrical"]
         if source_name == "pack_voltage":
@@ -398,6 +401,8 @@ class TransformEngine:
         voltage_t, current_t = electrical["voltage_t"], electrical["current_t"]
         if voltage_t is None or current_t is None:
             return
+        # Voltage and current arrive in separate frames. Pair them only while
+        # both source timestamps are close enough to calculate meaningful power.
         max_age_ns = int(self.policy["electrical_pair_max_age_ms"] * 1_000_000)
         if abs(voltage_t - current_t) > max_age_ns:
             return
@@ -419,7 +424,7 @@ class TransformEngine:
                     electrical["net_energy_wh"] -= signed / 3600
         if previous_t is None or timestamp >= previous_t:
             electrical["last_power_t"], electrical["last_power"] = timestamp, power
-        common = {"car_id": frame["car_id"], "session_id": session_id,
+        common = {"stream_id": frame["stream_id"], "session_id": session_id,
                   "timestamp_ns": timestamp, "policy": "medium"}
         values = [
             ("Pack_Power_W", power, "W", "HVC_Batt_Voltage_V+HVC_Pack_Current_A"),
@@ -430,10 +435,10 @@ class TransformEngine:
             ("Net_Energy_Change_Wh", electrical["net_energy_wh"], "Wh", "Pack_Power_W"),
         ]
         for signal, output, unit, source in values:
-            self._derived(lines, state, **common, signal=signal, value=output,
+            self._derived(points, state, **common, signal=signal, value=output,
                           unit=unit, source=source)
 
-    def _handle_alignment(self, lines, state, frame, signals, session_id):
+    def _handle_alignment(self, points, state, frame, signals, session_id):
         required = ("AlignStatus", "AlignXYError", "AlignZError", "AlignError")
         if not all(name in signals and _numeric(signals[name]) is not None for name in required):
             return
@@ -447,17 +452,18 @@ class TransformEngine:
             state, "IMU_Alignment_Valid", frame["timestamp_ns"], "event")
         if changed or should_emit:
             self._derived(
-                lines, state, car_id=frame["car_id"], session_id=session_id,
+                points, state, stream_id=frame["stream_id"], session_id=session_id,
                 timestamp_ns=frame["timestamp_ns"], signal="IMU_Alignment_Valid",
                 value=1 if valid else 0, unit="bool", policy="event",
                 source="AlignStatus", force=True)
 
-    def _handle_imu(self, lines, state, frame, signals, session_id):
+    def _handle_imu(self, points, state, frame, signals, session_id):
         names = ("ImuValid", "AccelerationX", "AccelerationY")
         if not all(name in signals and _numeric(signals[name]) is not None for name in names):
             return
         imu = state["imu"]
         freshness_ns = int(self.policy["imu_alignment"]["max_age_ms"] * 1_000_000)
+        # Only aligned, valid IMU samples become vehicle acceleration outputs.
         aligned = (imu["alignment_valid"] and imu["alignment_t"] is not None and
                    0 <= frame["timestamp_ns"] - imu["alignment_t"] <= freshness_ns)
         if int(_numeric(signals["ImuValid"])) != 1 or not aligned:
@@ -468,57 +474,50 @@ class TransformEngine:
         longitudinal = _numeric(signals["AccelerationX"]) / 9.80665
         lateral = _numeric(signals["AccelerationY"]) / 9.80665
         combined = math.hypot(longitudinal, lateral)
-        tags = (f"car={_escape_tag(frame['car_id'])},session={_escape_tag(session_id)},"
-                "source=CAN9_IMU,unit=g")
-        lines.append(
-            f"vehicle_dynamics,{tags} longitudinal_g={longitudinal},"
-            f"lateral_g={lateral},combined_g={combined},alignment_valid=true {timestamp}")
+        points.append({
+            "measurement": "vehicle_dynamics",
+            "tags": {"car": frame["stream_id"], "session": session_id,
+                     "source": "CAN9_IMU", "unit": "g"},
+            "fields": {"longitudinal_g": longitudinal, "lateral_g": lateral,
+                       "combined_g": combined, "alignment_valid": True},
+            "timestamp_ns": timestamp,
+        })
         for signal, value in (("Longitudinal_Accel_g", longitudinal),
                               ("Lateral_Accel_g", lateral),
                               ("Combined_Accel_g", combined)):
             self._derived(
-                lines, state, car_id=frame["car_id"], session_id=session_id,
+                points, state, stream_id=frame["stream_id"], session_id=session_id,
                 timestamp_ns=timestamp, signal=signal, value=value, unit="g",
                 policy="fast", source="CAN9_ImuData", force=True)
 
-    def prepare(self, decoded_frames):
-        """Return line protocol and proposed state for decoded ``(frame, result)`` pairs."""
-        lines = []
-        work = {}
-        session_catalog = self.sessions.catalog()
-        ordered = sorted(decoded_frames, key=lambda item: (
-            item[0]["timestamp_ns"], item[0].get("seq", 0)))
-        for frame, decoded in ordered:
-            if decoded is None:
+    def process_frame(self, frame, *, session_catalog=None):
+        """Update running state once and return this input's calculated samples."""
+        signals = frame.get("decoded", {})
+        if not signals:
+            return []
+        source_key = (frame.get("bus", "unknown"), frame.get("dbc", ""),
+                      frame.get("message", ""))
+        message_source = self._message_sources.get(source_key)
+        signal_sources = self._signal_sources.get(source_key, {})
+        if message_source is None and not signal_sources:
+            return []  # Ordinary decoded messages need no calculation state.
+        points = []
+        session_id = self.sessions.session_for(frame["timestamp_ns"], session_catalog)
+        state = self._state(session_id, frame["stream_id"])
+        if message_source == "imu_alignment":
+            self._handle_alignment(points, state, frame, signals, session_id)
+        elif message_source == "imu_data":
+            self._handle_imu(points, state, frame, signals, session_id)
+        # Visit only configured inputs, rather than scanning every BMS or
+        # inverter signal when that message has no relevant calculation.
+        for signal_name, source_name in signal_sources.items():
+            value = _numeric(signals.get(signal_name))
+            if value is None:
                 continue
-            dbc_file, message_name, signals = decoded
-            session_id = self.sessions.session_for(
-                frame["timestamp_ns"], session_catalog)
-            state = self._state(work, session_id, frame["car_id"])
-            message_source = self._message_sources.get(
-                (frame.get("bus", "unknown"), dbc_file, message_name))
-            if message_source == "imu_alignment":
-                self._handle_alignment(lines, state, frame, signals, session_id)
-            if message_source == "imu_data":
-                self._handle_imu(lines, state, frame, signals, session_id)
-            for signal_name, raw_value in signals.items():
-                value = _numeric(raw_value)
-                if value is None:
-                    continue
-                source_name = self._signal_sources.get((
-                    frame.get("bus", "unknown"), dbc_file, message_name, signal_name))
-                if source_name == "vehicle_speed":
-                    self._handle_speed(lines, state, frame, value, session_id)
-                elif source_name == "pack_voltage":
-                    self._handle_electrical(
-                        lines, state, frame, "pack_voltage", value, session_id)
-                elif source_name == "pack_current":
-                    self._handle_electrical(
-                        lines, state, frame, "pack_current", value, session_id)
-                elif source_name == "accumulator_temp_max":
-                    self._handle_temperature(lines, state, frame, value, session_id)
-        return TransformPlan(lines, work)
-
-    def commit(self, plan):
-        self._committed.update(copy.deepcopy(plan.states))
-
+            if source_name == "vehicle_speed":
+                self._handle_speed(points, state, frame, value, session_id, signal_name)
+            elif source_name in ("pack_voltage", "pack_current"):
+                self._handle_electrical(points, state, frame, source_name, value, session_id)
+            elif source_name == "accumulator_temp_max":
+                self._handle_temperature(points, state, frame, value, session_id)
+        return points

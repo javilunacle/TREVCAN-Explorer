@@ -24,9 +24,10 @@ raw frame with its bus, ID, sequence, bytes, DBC, and decoded summary. Capture
 timestamps are preserved. Synthetic scenarios use `trevcan_synthetic` instead.
 
 The Live dashboard includes four key vehicle graphs, a static DBC-message
-selector, selected-message samples/latest values, and recent raw frames. Its
-one-minute view is limited to a browser buffer of at most 20,000 rows per query;
-it starts when the viewer subscribes. Use capture timestamps to assess stale
+selector, selected-message samples/latest values, recent raw frames, and a
+calculated-signal selector/graph. Calculated signals use channels such as
+`stream/trevcan/derived_Vehicle_Speed_mps`. The browser keeps a bounded recent
+window starting when the viewer subscribes; it does not load the entire run. Use capture timestamps to assess stale
 values. Grafana Live is not the historical archive. The rest of the dashboards
 use InfluxDB for historical analysis; their stable UIDs/URLs are preserved.
 
@@ -51,24 +52,38 @@ During healthy capture, InfluxDB receives every raw frame and every numeric
 decoded sample, rather than the latest value from each export batch. Outages
 leave gaps: neither Pi keeps a SQLite replay queue. Historical chart queries may
 downsample for display; integrations and derivatives consume every selected
-source update before their derived publication policy is applied. Transform
-state stays in receiver RAM and advances after successful writes. Restarting
-the receiver resets running totals; the session catalog contains metadata only.
+source update before their publication policy is applied. Fast outputs publish
+on each eligible input; medium/slow outputs retain their configured spacing.
+`process_frame()` advances RAM state once before the two output workers run,
+independently of InfluxDB writes. Restarting the receiver resets running totals;
+the session catalog contains metadata only.
 
 The CAN-frame dashboard combines raw and decoded fields from the `can_frame`
-measurement. Its recent-frames table is deliberately limited to the latest minute and
-500 rows so Grafana does not pivot and sort the full dashboard time range on
-every refresh. DBC-file and CAN-bus selectors make the combined table easier
+measurement. Its recorded-frames table returns each stored frame in the
+selected Grafana time range, without `last()` or a fixed 500-row limit. CSV
+exports contain the query results for that selection. Narrow the range and
+filters when reviewing high-rate runs to avoid loading millions of browser
+rows at once. DBC-file and CAN-bus selectors make the combined table easier
 to inspect; selecting **All** keeps unknown CAN IDs visible as
 `Unknown / undecoded`. The subsystem dashboards query numeric decoded values
 from `can_signal`, using its `dbc`, `message`, and `signal` tags to avoid mixing
 unrelated data.
 
-The receiver uses the first matching frame ID in its configured DBC order. The
-dashboard signal names therefore match the order in
-`telemetry/start_server_pi.sh`: BMS, HVC, inverter, master/VCU, then MOBO.
-Overlapping IDs and the actual vehicle bus still require validation against the
-team-approved DBC set.
+CANManager frames carry their DBC/message identity and are never re-decoded.
+For raw-only diagnostic inputs, the receiver uses its configured DBC order
+from `telemetry/start_server_pi.sh`. Car frames instead retain the active
+CANManager definition's filename and signal names. Inverter history queries
+accept both `Inverter.dbc` (the car) and `BMS-Inverter-Only.dbc` (earlier or
+diagnostic decoding); the Live inverter selector labels use `Inverter.dbc`.
+
+The car catalog now includes BMS-complete on `can0`, GPS/IMU on `can1`, and
+a lower-priority DAQ fallback for missing message IDs. No car dashboard gauge
+is required for these messages to reach Grafana and InfluxDB. Other reference
+DBCs are not interchangeable: HVC and MOBO panels/selectors still need their
+reference signal names aligned with the car's active definitions. HVC pack
+totals also await the confirmed Hi/Lo combination rule. Overlapping IDs and
+the actual vehicle bus still require validation against the team-approved
+DBC set.
 
 ## Scope and safety boundary
 

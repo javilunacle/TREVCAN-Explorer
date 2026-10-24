@@ -2,17 +2,16 @@
 
 import argparse
 import asyncio
-import copy
 import json
 import math
 import os
 import urllib.request
 from pathlib import Path
 
-from .common import wire_line
+from .common import point_line, wire_line
 from .buffers import RawBuffer
 from .live import GrafanaLivePublisher, stream_namespace
-from .transforms import TransformEngine, TransformPlan
+from .transforms import TransformEngine
 
 
 
@@ -107,14 +106,6 @@ def parse_bus_dbcs(values):
     return result
 
 
-def _escape_tag(value):
-    return str(value).replace("\\", "\\\\").replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
-
-
-def _escape_field(value):
-    return str(value).replace("\\", "\\\\").replace('"', '\\"')
-
-
 _TABLE_ROW_SEPARATOR = "\u241f"
 
 
@@ -128,75 +119,50 @@ def _table_row_value(*values):
 
 
 
-def prepare_influx_history(frames, decoder, transformer=None):
-    """Preserve each source sample and stage retry-safe derived transform state."""
-    decoded_frames = []
-    signal_samples = []
-    for frame in frames:
-        decoded = decoder.decode(frame)
-        decoded_frames.append((frame, decoded))
-        if decoded is None:
-            continue
-        dbc_file, message_name, signals = decoded
-        for name, value in signals.items():
-            key = (frame["car_id"], frame.get("bus", "unknown"),
-                   frame["can_id"], message_name, name, dbc_file)
-            signal_samples.append((key, (frame, value)))
-
+def prepare_influx_history(frames):
+    """Format every prepared frame and numeric sample at its capture timestamp."""
     lines = []
-    for frame, decoded in decoded_frames:
-        base = (f"car={_escape_tag(frame['car_id'])},bus={_escape_tag(frame.get('bus', 'unknown'))},"
-                f"can_id=0x{frame['can_id']:X},ext={str(frame['is_extended']).lower()}")
-        data = frame["data"]
-        fields = [f"seq={frame['seq']}i", f"dlc={frame['dlc']}i",
-                  f'data="{data.hex().upper()}"',
-                  f"remote={str(frame['is_remote']).lower()}",
-                  f"fd={str(frame['is_fd']).lower()}",
-                  f"error={str(frame['is_error']).lower()}"]
-        fields.extend(f"b{i}={byte}i" for i, byte in enumerate(data))
-        if decoded is not None:
-            dbc_file, message_name, signals = decoded
-            summary = "; ".join(
-                f"{name}={value.name} ({value.value})"
-                if hasattr(value, "name") and hasattr(value, "value") else f"{name}={value}"
-                for name, value in signals.items())
-            fields.extend((f'message="{_escape_field(message_name)}"',
-                           f'dbc="{_escape_field(dbc_file)}"',
-                           f'decoded="{_escape_field(summary)}"'))
-        else:
-            message_name = "Unknown"
-            dbc_file = "Unknown / undecoded"
-            summary = ""
-            fields.extend((f'message="{message_name}"', f'dbc="{dbc_file}"',
-                           'decoded=""'))
-        table_row = _table_row_value(
-            frame["seq"], frame["dlc"], data.hex().upper(), dbc_file,
-            message_name, summary,
-        )
-        fields.append(f'table_row="{_escape_field(table_row)}"')
-        lines.append(f"can_frame,{base} {','.join(fields)} {frame['timestamp_ns']}")
-
-    for key, (frame, value) in signal_samples:
-        car_id, bus, can_id, message_name, name, dbc_file = key
-        tags = (f"car={_escape_tag(car_id)},bus={_escape_tag(bus)},can_id=0x{can_id:X},"
-                f"message={_escape_tag(message_name)},signal={_escape_tag(name)},"
-                f"dbc={_escape_tag(dbc_file)}")
-        signal_fields = [f"seq={frame['seq']}i"]
-        if hasattr(value, "name") and hasattr(value, "value"):
-            signal_fields.append(f"value={float(value.value)}")
-            signal_fields.append(f'state="{_escape_field(value.name)}"')
-        elif isinstance(value, (int, float)):
-            if not math.isfinite(value):
-                continue  # Influx cannot store NaN/Inf; raw bytes remain available.
-            signal_fields.append(f"value={float(value)}")
-        else:
-            continue
-        lines.append(f"can_signal,{tags} {','.join(signal_fields)} {frame['timestamp_ns']}")
-    payload = "\n".join(lines) + ("\n" if lines else "")
-    plan = transformer.prepare(decoded_frames) if transformer else TransformPlan([], {})
-    return payload + plan.line_protocol(), plan
-
-
+    for frame in frames:
+        signals = frame["decoded"]
+        labels = frame.get("labels", {})
+        dbc = frame["dbc"] or "Unknown / undecoded"
+        message = frame["message"] or "Unknown"
+        summary = "; ".join(
+            f"{name}={labels[name]} ({value})" if name in labels else f"{name}={value}"
+            for name, value in signals.items())
+        # Keep the historical `car` tag for existing dashboards; it is a stream
+        # ID. Each frame keeps its own timestamp and sequence, even inside a batch.
+        tags = {"car": frame["stream_id"], "bus": frame.get("bus", "unknown"),
+                "can_id": f"0x{frame['can_id']:X}"}
+        data = frame["data"].hex().upper()
+        fields = {"seq": frame["seq"], "dlc": frame["dlc"], "data": data,
+                  "remote": frame["is_remote"], "fd": frame["is_fd"],
+                  "error": frame["is_error"], "message": message, "dbc": dbc,
+                  "decoded": summary,
+                  "table_row": _table_row_value(
+                      frame["seq"], frame["dlc"], data, dbc, message, summary)}
+        fields.update({f"b{i}": byte for i, byte in enumerate(frame["data"])})
+        lines.append(point_line({
+            "measurement": "can_frame", "fields": fields,
+            "tags": {**tags, "ext": str(frame["is_extended"]).lower()},
+            "timestamp_ns": frame["timestamp_ns"],
+        }))
+        # Record every numeric decoded update, not just the last one in a batch.
+        for name, value in signals.items():
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                continue
+            fields = {"seq": frame["seq"], "value": float(value)}
+            if name in labels:
+                fields["state"] = labels[name]
+            lines.append(point_line({
+                "measurement": "can_signal", "fields": fields,
+                "tags": {**tags, "message": message, "signal": name, "dbc": dbc},
+                "timestamp_ns": frame["timestamp_ns"],
+            }))
+        # Calculations already ran once on acceptance. Both output workers use
+        # these same results, independently of network success or write latency.
+        lines.extend(point_line(point) for point in frame["calculated"])
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def post_influx(url, token, payload):
@@ -209,8 +175,8 @@ def post_influx(url, token, payload):
             raise RuntimeError(f"InfluxDB returned HTTP {response.status}")
 
 
-async def export_forever(store, decoder, url, token, stop=None, *, batch_size=5000,
-                         interval_seconds=0.1, transformer=None):
+async def export_forever(store, url, token, stop=None, *, batch_size=5000,
+                         interval_seconds=0.1):
     stop = stop or asyncio.Event()
     last_status = asyncio.get_running_loop().time()
     while not stop.is_set():
@@ -227,19 +193,9 @@ async def export_forever(store, decoder, url, token, stop=None, *, batch_size=50
         if not batch:
             continue
         try:
-            try:
-                payload, plan = await asyncio.to_thread(
-                    prepare_influx_history, batch, decoder, transformer)
-            except Exception as exc:
-                # Raw and ordinary decoded telemetry remain available even if a
-                # transform policy has a bug or receives an unexpected value.
-                print(f"[transform] batch skipped: {exc}", flush=True)
-                payload, plan = await asyncio.to_thread(
-                    prepare_influx_history, batch, decoder, None)
+            payload = await asyncio.to_thread(prepare_influx_history, batch)
             await asyncio.to_thread(post_influx, url, token, payload)
             store.finish_export(batch)
-            if transformer is not None:
-                transformer.commit(plan)
         except Exception as exc:
             store.discard_pending()
             print(f"[influx] export failed: {exc}; disconnected data discarded", flush=True)
@@ -252,7 +208,31 @@ async def export_forever(store, decoder, url, token, stop=None, *, batch_size=50
 
 
 
-async def serve_client(reader, writer, store, token, live=None):
+def prepare_frame(frame, decoder=None, transformer=None, *, session_catalog=None):
+    """Use the supplied decode, then calculate once before output fan-out."""
+    if "decoded" not in frame:
+        # Raw-only diagnostic/synthetic senders still work. CANManager records
+        # already have this field, even when empty, and never enter this decode.
+        result = decoder.decode(frame) if decoder is not None else None
+        dbc, message, signals = result if result else ("", "", {})
+        frame["dbc"], frame["message"] = dbc, message
+        frame["labels"] = {name: value.name for name, value in signals.items()
+                           if hasattr(value, "name") and hasattr(value, "value")}
+        frame["decoded"] = {
+            name: value.value if hasattr(value, "value") else value
+            for name, value in signals.items()}
+    frame.setdefault("dbc", "")
+    frame.setdefault("message", "")
+    frame.setdefault("labels", {})
+    frame["calculated"] = []
+    if transformer is not None:
+        frame["calculated"] = transformer.process_frame(
+            frame, session_catalog=session_catalog)
+
+
+async def serve_client(reader, writer, store, token, live=None, *, decoder=None,
+                       transformer=None):
+    transform_failures = 0
     try:
         while True:
             raw = await reader.readline()
@@ -264,16 +244,19 @@ async def serve_client(reader, writer, store, token, live=None):
                     raise ValueError("invalid token")
                 frames = (message.get("frames") if message.get("type") == "batch"
                           else [message])
-                # Validate/accept before offering anything to the best-effort live
-                # branch. Retransmissions after a lost ACK must not stream twice.
-                previous = (store.last_sequence(frames[0].get("car_id"))
-                            if live and isinstance(frames, list) and frames
-                            and isinstance(frames[0], dict)
-                            and isinstance(frames[0].get("car_id"), str) else 0)
-                if message.get("type") == "batch":
-                    seq = store.commit_batch(message.get("frames"))
-                else:
-                    seq = store.commit_frame(message)
+                # Validate the whole batch and reject duplicate sequences before
+                # updating calculations. The returned objects are also in RawBuffer.
+                seq, accepted = store.commit_batch(frames)
+                catalog = transformer.sessions.catalog() if transformer else None
+                for frame in accepted:
+                    try:
+                        prepare_frame(frame, decoder, transformer, session_catalog=catalog)
+                    except Exception as exc:
+                        # Keep raw/decoded observations if one calculation fails.
+                        # Do not retry this input and accidentally integrate it twice.
+                        transform_failures += 1
+                        if transform_failures <= 5 or transform_failures % 1000 == 0:
+                            print(f"[transform] skipped seq={frame['seq']}: {exc}", flush=True)
                 writer.write(wire_line({"type": "ack", "seq": seq}))
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                 writer.write(wire_line({"type": "error", "error": str(exc)}))
@@ -281,7 +264,7 @@ async def serve_client(reader, writer, store, token, live=None):
                 break
             await writer.drain()
             if live is not None:
-                live.offer(frame for frame in frames if frame["seq"] > previous)
+                live.offer(accepted)
     finally:
         writer.close()
         try:
@@ -295,10 +278,10 @@ async def run(args):
     decoder = DBCDecoder(args.dbc, parse_bus_dbcs(args.dbc_bus))
     live = None
     if args.grafana_live_url:
-        # DBC definitions are read-only; separate counters avoid sharing decoder
-        # state between the historical thread and the dedicated live thread.
+        # Output workers only format/send prepared samples. They never decode
+        # or calculate, and Live does not wait for the InfluxDB writer.
         live = GrafanaLivePublisher(
-            copy.copy(decoder), args.grafana_live_url, args.grafana_live_token,
+            args.grafana_live_url, args.grafana_live_token,
             flush_seconds=args.live_flush_ms / 1000,
             batch_size=args.live_batch_size, queue_size=args.live_queue_size,
             max_age_seconds=args.live_max_age_seconds)
@@ -310,7 +293,9 @@ async def run(args):
     print(f"[server] {store.quick_status()}", flush=True)
     try:
         server = await asyncio.start_server(
-            lambda reader, writer: serve_client(reader, writer, store, args.token, live),
+            lambda reader, writer: serve_client(
+                reader, writer, store, args.token, live,
+                decoder=decoder, transformer=transformer),
             args.host, args.port, limit=1024 * 1024)
         print(f"[server] listening on {args.host}:{args.port}", flush=True)
         async with server:
@@ -320,8 +305,7 @@ async def run(args):
                     group.create_task(live.run())
                 if args.influx_url:
                     group.create_task(export_forever(
-                        store, decoder, args.influx_url, args.influx_token,
-                        transformer=transformer))
+                        store, args.influx_url, args.influx_token))
     finally:
         store.close()
 

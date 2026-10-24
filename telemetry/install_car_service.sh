@@ -63,10 +63,8 @@ done
     echo "No usable Python interpreter found." >&2
     exit 1
 }
-"$python_bin" -c 'import can' 2>/dev/null || {
-    echo "$python_bin does not have python-can installed." >&2
-    exit 1
-}
+# The default CANManager socket input uses only the Python standard library.
+# python-can is needed only when manually selecting direct --interface capture.
 
 token="${TELEMETRY_TOKEN:-}"
 if [[ -z "$token" && -r "$config_path" ]]; then
@@ -88,6 +86,7 @@ install -m 0644 "$script_dir/__init__.py" "$package_dir/__init__.py"
 install -m 0644 "$script_dir/common.py" "$package_dir/common.py"
 install -m 0644 "$script_dir/buffers.py" "$package_dir/buffers.py"
 install -m 0644 "$script_dir/car.py" "$package_dir/car.py"
+install -m 0644 "$script_dir/canmanager_input.py" "$package_dir/canmanager_input.py"
 
 temporary_env="$(mktemp)"
 temporary_unit="$(mktemp)"

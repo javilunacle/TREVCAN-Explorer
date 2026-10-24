@@ -1,8 +1,9 @@
 # TREVCAN Telemetry project guidelines
 
 This repository contains a passive two-Pi telemetry pipeline. The car Pi reads
-SocketCAN and sends small TCP batches. The telemetry Pi decodes DBC signals,
-publishes current samples to Grafana Live, and records history in InfluxDB.
+SocketCAN through dashboard CANManager and sends raw/decoded TCP batches. The
+telemetry Pi calculates once per accepted frame, then publishes the same samples
+to Grafana Live and InfluxDB. Raw-only diagnostic inputs decode once on receipt.
 
 ## Architecture
 
@@ -21,7 +22,8 @@ publishes current samples to Grafana Live, and records history in InfluxDB.
 - Discard disconnected data and resume fresh; do not introduce disk spooling.
 - Keep memory bounded. ACKs acknowledge RAM acceptance, not durable recording.
 - Preserve every decoded update within a healthy publication batch.
-- Keep Grafana Live independent of InfluxDB write latency/failure.
+- Keep Grafana Live and calculation state independent of InfluxDB writes.
+- Fast calculated outputs follow eligible inputs (`publish_period_ms: 0`).
 - Use original capture timestamps for historical samples and calculations.
 - Keep synthetic `scenario-*` streams out of real-vehicle dashboard channels.
 - Keep CAN capture passive; simulation never transmits onto SocketCAN.
@@ -31,11 +33,10 @@ publishes current samples to Grafana Live, and records history in InfluxDB.
 ## Validation
 
 ```bash
-python -m unittest discover -s telemetry -t .
 python -m telemetry.grafana.render_provisioned
 python -m telemetry.scenario_runner --list
 ```
 
-Tests run without CAN hardware or database services. Deployment and measured
+These checks run without CAN hardware or database services. Deployment and measured
 Pi throughput/latency require separate hardware validation. Read
 `telemetry/README.md` for installation and test-day operations.
