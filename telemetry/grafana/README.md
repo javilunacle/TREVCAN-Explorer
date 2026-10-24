@@ -41,6 +41,9 @@ are 10% faster. Zero front RPM or invalid front-wheel readings omit the sample.
 Live uses `derived.Slip_Ratio` on the traction-control channel; history stores
 `Slip_Ratio` in `telemetry_derived`, with the existing test-session selector.
 Historical ratios are recorded after this update; earlier captures are not backfilled.
+The Live slip-ratio panel displays **Waiting for valid wheel data** when its
+buffer contains no usable ratio samples. A display-only row transformation
+preserves valid ratios and removes null rows; missing ratios never become zero.
 
 **Launch speed: target vs actual RPM** appears in Live Telemetry and Historical
 VCU. It overlays `VCU_LS_Target_RPM` (blue) and `VCU_LS_Actual_RPM` (orange) from

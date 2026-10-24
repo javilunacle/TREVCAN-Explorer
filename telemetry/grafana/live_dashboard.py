@@ -116,7 +116,31 @@ def live_dashboard():
         " Rear-wheel RPM / average front-wheel RPM from the same VCU traction-control "
         "sample. 1.0 = no slip; 1.1 = rear wheels 10% faster. Requires both front "
         "validity flags and positive front RPM; invalid samples are omitted.")
-    slip["fieldConfig"]["defaults"].update({"displayName": "Slip ratio", "decimals": 3})
+    slip["fieldConfig"]["defaults"].update({
+        "displayName": "Slip ratio", "decimals": 3,
+        "noValue": "Waiting for valid wheel data",
+    })
+    # A time-only stream is a normal waiting state until the first valid ratio.
+    # Reduce each row separately: missing ratio -> null, never a synthetic zero.
+    # Keep each source frame separate, retain time, then omit the null rows so
+    # Grafana uses noValue instead of its missing-number-field schema warning.
+    slip["transformations"] = [
+        {"id": "calculateField", "options": {
+            "mode": "reduceRow", "timeSeries": False,
+            "reduce": {"include": ["derived.Slip_Ratio"], "reducer": "lastNotNull"},
+            "alias": "Slip ratio", "replaceFields": False,
+        }},
+        {"id": "filterFieldsByName", "options": {
+            "include": {"names": ["time", "Time", "Slip ratio"]},
+        }},
+        {"id": "filterByValue", "options": {
+            "type": "include", "match": "all",
+            "filters": [{"fieldName": "Slip ratio", "config": {"id": "isNotNull"}}],
+        }},
+        {"id": "filterFields", "options": {
+            "exclude": {"id": "byValue", "options": {"reducer": "allIsNull"}},
+        }},
+    ]
     panels.append(slip)
     launch_fields = ["signal.VCU_LS_Target_RPM", "signal.VCU_LS_Actual_RPM"]
     launch_messages = [item for item in catalog if item["dbc"] == "VCU.dbc" and
