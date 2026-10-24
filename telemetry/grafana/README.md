@@ -26,7 +26,7 @@ Live query field selections retain the timestamp (`time` or `Time`) alongside
 the plotted signals; omitting it causes Grafana's "Data is missing a time field" error.
 
 The Live dashboard includes four key vehicle graphs, slip-ratio, launch-speed,
-and inverter/rear-wheel RPM graphs, a static DBC-message
+inverter/rear-wheel RPM, and vehicle temperature graphs, a static DBC-message
 selector, selected-message samples/latest values, and recent raw frames. Its
 one-minute view is limited to a browser buffer of at most 20,000 rows per query;
 it starts when the viewer subscribes. Use capture timestamps to assess stale
@@ -58,6 +58,15 @@ Inverter. It overlays `INV_Motor_Speed` from the inverter on can0 (blue),
 RPM axis and preserve signed values. These are raw motor-shaft and wheel speeds,
 without gearing correction or filtering on DAQ validity; check the rear-wheel
 Valid and Timeout fields to assess whether a reported wheel speed is usable.
+
+**Vehicle temperatures** appears in Live Telemetry and Historical Vehicle
+Overview. One Celsius axis compares all 11 inverter temperature readings
+(electronics, motor, RTDs, and coolant), battery minimum/maximum from
+`HVC_ACC_Summary`, and the four DAQ coolant sensors: `DBR_CT_RAD1_Deg_C`,
+`DBR_CT_RAD2_Deg_C`, `DBR_CT_MOTOR_Deg_C`, and `DBR_CT_INV_Deg_C`. The legend on
+the right names each sensor and shows its latest value. The graph uses decoded
+temperatures without filtering on the DAQ Valid, ADC_Err or Out_of_Range flags;
+those flags remain available in the selected-message view.
 
 The subsystem dashboards replace the original catch-all Systems graph. Signals
 with different units are split into separate panels, legends display the signal

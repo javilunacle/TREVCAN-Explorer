@@ -5,6 +5,49 @@ the bus-specific DBC routing configured by ``telemetry/start_server_pi.sh``.
 """
 
 DATASOURCE = {"type": "influxdb", "uid": "trevcan-influxdb"}
+# Shared by the Live and historical temperature graphs. Keep message and bus
+# explicit so similarly named signals from other DBCs cannot enter the graph.
+TEMPERATURE_SOURCES = (
+    ("can0", "BMS-Inverter-Only.dbc", "Temperatures_1", (
+        ("INV_Module_A_Temp", "Inverter module A"),
+        ("INV_Module_B_Temp", "Inverter module B"),
+        ("INV_Module_C_Temp", "Inverter module C"),
+        ("INV_GDB_Temp", "Inverter gate driver"),
+    )),
+    ("can0", "BMS-Inverter-Only.dbc", "Temperatures_2", (
+        ("INV_Control_Board_Temp", "Inverter control board"),
+        ("INV_RTD1_Temperature", "RTD 1"),
+        ("INV_RTD2_Temperature", "RTD 2"),
+        ("INV_Hot_Spot_Temp_Motor", "Motor hot spot"),
+    )),
+    ("can0", "BMS-Inverter-Only.dbc", "Temperatures_3", (
+        ("INV_Coolant_Temp", "Inverter coolant"),
+        ("INV_Hot_Spot_Temp_Inverter", "Inverter hot spot"),
+        ("INV_Motor_Temp", "Motor"),
+    )),
+    ("can0", "hvc.dbc", "HVC_ACC_Summary", (
+        ("HVC_Acc_Temp_Min_C", "Battery minimum"),
+        ("HVC_Acc_Temp_Max_C", "Battery maximum"),
+    )),
+    ("can1", "DAQ-Firmware.dbc", "DBR_CT_RAD1", (
+        ("DBR_CT_RAD1_Deg_C", "Radiator 1 coolant"),
+    )),
+    ("can1", "DAQ-Firmware.dbc", "DBR_CT_RAD2", (
+        ("DBR_CT_RAD2_Deg_C", "Radiator 2 coolant"),
+    )),
+    ("can1", "DAQ-Firmware.dbc", "DBR_CT_MOTOR", (
+        ("DBR_CT_MOTOR_Deg_C", "Motor coolant (DAQ)"),
+    )),
+    ("can1", "DAQ-Firmware.dbc", "DBR_CT_INV", (
+        ("DBR_CT_INV_Deg_C", "Inverter coolant (DAQ)"),
+    )),
+)
+TEMPERATURE_DESCRIPTION = (
+    "Inverter electronics, motor, battery minimum/maximum, and both radiators "
+    "on one Celsius axis, including the motor and inverter coolant sensors. "
+    "DAQ temperatures are plotted as reported; their Valid, ADC_Err and "
+    "Out_of_Range fields indicate sensor health."
+)
 REFRESH_INTERVALS = ["1s", "2s", "5s"]
 QUICK_RANGES = [
     {"display": "Last 5 minutes", "from": "now-5m", "to": "now"},
@@ -451,6 +494,11 @@ def _session_variable(stream):
 
 
 def overview_dashboard():
+    temperature_condition = " or ".join(
+        f'(r.bus == "{bus}" and r.dbc == "{dbc}" and r.message == "{message}" and ('
+        + " or ".join(f'r.signal == "{signal}"' for signal, _ in signals) + "))"
+        for bus, dbc, message, signals in TEMPERATURE_SOURCES
+    )
     panels = [
         stat(1, "VCU speed", "VCU_Speed_MPH", {"x": 0, "y": 0, "w": 4, "h": 4},
              dbc="VCU.dbc", unit="velocitymph", decimals=1),
@@ -494,16 +542,25 @@ def overview_dashboard():
             unit="amp",
         ),
         timeseries(
-            12, "Key temperatures",
-            'r.signal == "INV_Motor_Temp" or r.signal == "INV_Coolant_Temp" or r.signal == "INV_Hot_Spot_Temp_Inverter" or r.signal == "HVC_Acc_Temp_Min_C" or r.signal == "HVC_Acc_Temp_Max_C"',
-            {"x": 0, "y": 20, "w": 12, "h": 8}, unit="suffix:°C",
+            12, "Vehicle temperatures", temperature_condition,
+            {"x": 0, "y": 20, "w": 24, "h": 12}, unit="celsius", decimals=1,
+            description=TEMPERATURE_DESCRIPTION,
+            group_columns=("car", "bus", "signal"),
         ),
         timeseries(
             13, "Low-voltage system currents",
             'r.signal == "LV_Current" or r.signal == "HC_Current"',
-            {"x": 12, "y": 20, "w": 12, "h": 8}, dbc="Baby_MOBO.dbc",
+            {"x": 0, "y": 32, "w": 24, "h": 8}, dbc="Baby_MOBO.dbc",
             unit="suffix:A",
         ),
+    ]
+    temperatures = next(panel for panel in panels if panel["id"] == 12)
+    temperatures["fieldConfig"]["defaults"]["custom"] = {"spanNulls": False}
+    temperatures["options"]["legend"]["placement"] = "right"
+    temperatures["fieldConfig"]["overrides"] = [
+        {"matcher": {"id": "byName", "options": signal},
+         "properties": [{"id": "displayName", "value": label}]}
+        for _, _, _, signals in TEMPERATURE_SOURCES for signal, label in signals
     ]
     for panel in panels:
         panel["gridPos"]["y"] += 3

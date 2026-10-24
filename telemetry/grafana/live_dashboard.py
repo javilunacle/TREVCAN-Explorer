@@ -6,7 +6,9 @@ from pathlib import Path
 import cantools
 
 from telemetry.live import live_measurement, stream_namespace
-from telemetry.grafana.dashboard_specs import _dashboard
+from telemetry.grafana.dashboard_specs import (
+    TEMPERATURE_DESCRIPTION, TEMPERATURE_SOURCES, _dashboard,
+)
 
 
 LIVE_DATASOURCE = {"type": "grafana", "uid": "grafana"}
@@ -195,20 +197,42 @@ def live_dashboard():
         "axis, with no gearing correction. Signed values are preserved. Check "
         "the DAQ rear-wheel Valid and Timeout signals when assessing wheel readings.")
     panels.append(speeds)
+    temperature_targets = []
+    for index, (bus, dbc, name, signals) in enumerate(TEMPERATURE_SOURCES):
+        message = next(item for item in catalog if item["bus"] == bus and
+                       item["dbc"] == dbc and item["message"] == name)
+        temperature_targets.append({
+            **_target(namespace, message["channel"],
+                      fields=[f"signal.{signal}" for signal, _ in signals]),
+            "refId": chr(ord("A") + index),
+        })
+    temperatures = _panel(11, "Vehicle temperatures",
+                          {"x": 0, "y": 28, "w": 24, "h": 12},
+                          temperature_targets[0], unit="celsius")
+    temperatures["targets"] = temperature_targets
+    temperatures["description"] += " " + TEMPERATURE_DESCRIPTION
+    temperatures["fieldConfig"]["defaults"]["decimals"] = 1
+    temperatures["options"]["legend"]["placement"] = "right"
+    temperatures["fieldConfig"]["overrides"] = [
+        {"matcher": {"id": "byRegexp", "options": f"^signal\\.{signal}(?: .*)?$"},
+         "properties": [{"id": "displayName", "value": label}]}
+        for _, _, _, signals in TEMPERATURE_SOURCES for signal, label in signals
+    ]
+    panels.append(temperatures)
     selected = _panel(5, "Selected message — decoded samples",
-                      {"x": 0, "y": 28, "w": 16, "h": 9},
+                      {"x": 0, "y": 40, "w": 16, "h": 9},
                       _target(namespace, "${can_message}"))
     selected["transformations"] = [{"id": "filterFieldsByName", "options": {
         "include": {"pattern": "^(Time|time|signal\\..*)$"}}}]
     panels.append(selected)
     values = _panel(6, "Selected message — latest values",
-                    {"x": 16, "y": 28, "w": 8, "h": 9},
+                    {"x": 16, "y": 40, "w": 8, "h": 9},
                     _target(namespace, "${can_message}"), kind="table")
     values["transformations"] = [{"id": "reduce", "options": {
         "reducers": ["lastNotNull"], "mode": "seriesToRows"}}]
     panels.append(values)
     panels.append(_panel(7, "Live CAN frames — recent arrivals",
-                         {"x": 0, "y": 37, "w": 24, "h": 10},
+                         {"x": 0, "y": 49, "w": 24, "h": 10},
                          _target(namespace, "can_frames"), kind="table"))
     dashboard = _dashboard("trevcan-live-telemetry", "TREVCAN - Live Telemetry",
                            "Streaming decoded CAN samples and raw frames. No InfluxDB polling. "
