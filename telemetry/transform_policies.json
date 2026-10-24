@@ -36,6 +36,11 @@
     "cooldown_ms": 5000
   },
   "sources": {
+    "wheel_speeds": {
+      "buses": ["can0", "can1"],
+      "dbc": "VCU.dbc",
+      "message": "VCU_Traction_Control"
+    },
     "vehicle_speed": {
       "buses": ["can0", "can1"],
       "dbc": "VCU.dbc",

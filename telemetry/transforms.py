@@ -39,6 +39,20 @@ def _numeric(value):
     return None
 
 
+def wheel_slip_ratio(signals):
+    """Rear/front wheel RPM ratio from one valid VCU traction-control sample."""
+    names = ("VCU_TC_Rear_Wheel_RPM", "VCU_TC_Avg_Front_RPM",
+             "VCU_TC_Front_Left_Valid", "VCU_TC_Front_Right_Valid")
+    values = [_numeric(signals.get(name)) for name in names]
+    if any(value is None or not math.isfinite(value) for value in values):
+        return None
+    rear, front, left_valid, right_valid = values
+    if rear < 0 or front <= 0 or left_valid != 1 or right_valid != 1:
+        return None
+    ratio = rear / front
+    return ratio if math.isfinite(ratio) else None
+
+
 class SessionRegistry:
     """Small atomically-written catalog shared by Test Controls and transforms."""
 
@@ -501,6 +515,14 @@ class TransformEngine:
                 self._handle_alignment(lines, state, frame, signals, session_id)
             if message_source == "imu_data":
                 self._handle_imu(lines, state, frame, signals, session_id)
+            if message_source == "wheel_speeds":
+                ratio = wheel_slip_ratio(signals)
+                if ratio is not None:
+                    self._derived(
+                        lines, state, car_id=frame["car_id"], session_id=session_id,
+                        timestamp_ns=frame["timestamp_ns"], signal="Slip_Ratio",
+                        value=ratio, unit="ratio", policy="fast",
+                        source="VCU_TC_Rear_Wheel_RPM/VCU_TC_Avg_Front_RPM")
             for signal_name, raw_value in signals.items():
                 value = _numeric(raw_value)
                 if value is None:

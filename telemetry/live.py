@@ -14,6 +14,8 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
+from .transforms import wheel_slip_ratio
+
 
 def live_measurement(bus, can_id, is_extended):
     """Stable, bus-aware channel path, independent of signal value or car ID."""
@@ -66,6 +68,10 @@ def live_lines(frames, decoder):
         if decoded is None:
             continue
         signal_fields = []
+        if dbc == "VCU.dbc" and message == "VCU_Traction_Control":
+            ratio = wheel_slip_ratio(signals)
+            if ratio is not None:
+                signal_fields.append(f"derived.Slip_Ratio={ratio}")
         for name, value in signals.items():
             if hasattr(value, "name") and hasattr(value, "value"):
                 signal_fields.append(f"{_tag('state.' + name)}={_string(value.name)}")

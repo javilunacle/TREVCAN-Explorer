@@ -95,20 +95,41 @@ def live_dashboard():
                              {"x": (index % 2) * 12, "y": (index // 2) * 7, "w": 12, "h": 7},
                              _target(namespace, message["channel"], fields=[f"signal.{signal}"]),
                              unit=unit))
+    traction = [item for item in catalog if item["dbc"] == "VCU.dbc" and
+                item["message"] == "VCU_Traction_Control"]
+    slip = _panel(8, "Slip ratio (rear / front)",
+                  {"x": 0, "y": 14, "w": 24, "h": 7},
+                  _target(namespace, traction[0]["channel"], fields=["derived.Slip_Ratio"]),
+                  unit="suffix:x")
+    slip["targets"] = []
+    for index, message in enumerate(traction):
+        target = _target(namespace, message["channel"], fields=["derived.Slip_Ratio"])
+        target["refId"] = chr(ord("A") + index)
+        slip["targets"].append(target)
+        slip["fieldConfig"]["overrides"].append({
+            "matcher": {"id": "byFrameRefID", "options": target["refId"]},
+            "properties": [{"id": "displayName", "value": f"Slip ratio ({message['bus']})"}],
+        })
+    slip["description"] += (
+        " Rear-wheel RPM / average front-wheel RPM from the same VCU traction-control "
+        "sample. 1.0 = no slip; 1.1 = rear wheels 10% faster. Requires both front "
+        "validity flags and positive front RPM; invalid samples are omitted.")
+    slip["fieldConfig"]["defaults"].update({"displayName": "Slip ratio", "decimals": 3})
+    panels.append(slip)
     selected = _panel(5, "Selected message — decoded samples",
-                      {"x": 0, "y": 14, "w": 16, "h": 9},
+                      {"x": 0, "y": 21, "w": 16, "h": 9},
                       _target(namespace, "${can_message}"))
     selected["transformations"] = [{"id": "filterFieldsByName", "options": {
         "include": {"pattern": "^(Time|time|signal\\..*)$"}}}]
     panels.append(selected)
     values = _panel(6, "Selected message — latest values",
-                    {"x": 16, "y": 14, "w": 8, "h": 9},
+                    {"x": 16, "y": 21, "w": 8, "h": 9},
                     _target(namespace, "${can_message}"), kind="table")
     values["transformations"] = [{"id": "reduce", "options": {
         "reducers": ["lastNotNull"], "mode": "seriesToRows"}}]
     panels.append(values)
     panels.append(_panel(7, "Live CAN frames — recent arrivals",
-                         {"x": 0, "y": 23, "w": 24, "h": 10},
+                         {"x": 0, "y": 30, "w": 24, "h": 10},
                          _target(namespace, "can_frames"), kind="table"))
     dashboard = _dashboard("trevcan-live-telemetry", "TREVCAN - Live Telemetry",
                            "Streaming decoded CAN samples and raw frames. No InfluxDB polling. "

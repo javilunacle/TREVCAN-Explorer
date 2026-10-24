@@ -23,12 +23,21 @@ preserves textual/enum labels. `stream/trevcan/can_frames` carries every fresh
 raw frame with its bus, ID, sequence, bytes, DBC, and decoded summary. Capture
 timestamps are preserved. Synthetic scenarios use `trevcan_synthetic` instead.
 
-The Live dashboard includes four key vehicle graphs, a static DBC-message
+The Live dashboard includes four key vehicle graphs, a slip-ratio graph, a static DBC-message
 selector, selected-message samples/latest values, and recent raw frames. Its
 one-minute view is limited to a browser buffer of at most 20,000 rows per query;
 it starts when the viewer subscribes. Use capture timestamps to assess stale
 values. Grafana Live is not the historical archive. The rest of the dashboards
 use InfluxDB for historical analysis; their stable UIDs/URLs are preserved.
+
+**Slip ratio (rear / front)** appears in Live Telemetry and Historical Analysis
+(and the shared Synthetic Validation view). It calculates rear-wheel RPM divided
+by average front-wheel RPM from the same VCU traction-control frame, independently
+of `VCU_TC_Slip_Ratio`. `1.0` means equal wheel speeds; `1.1` means the rear wheels
+are 10% faster. Zero front RPM or invalid front-wheel readings omit the sample.
+Live uses `derived.Slip_Ratio` on the traction-control channel; history stores
+`Slip_Ratio` in `telemetry_derived`, with the existing test-session selector.
+Historical ratios are recorded after this update; earlier captures are not backfilled.
 
 The subsystem dashboards replace the original catch-all Systems graph. Signals
 with different units are split into separate panels, legends display the signal

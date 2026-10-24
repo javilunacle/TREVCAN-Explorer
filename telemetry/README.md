@@ -360,6 +360,12 @@ The initial policy provides:
   treated as zero for these derived calculations while raw decoded speed is
   preserved unchanged;
 - pack power plus charge/discharge amp-hours and energy totals;
+- wheel slip ratio, calculated as `VCU_TC_Rear_Wheel_RPM / VCU_TC_Avg_Front_RPM`
+  from each `VCU_Traction_Control` frame (`1.0` = no slip, `1.1` = rear wheels
+  10% faster). Both front-wheel validity flags must be set and average front RPM
+  must be positive; missing, invalid, or non-finite inputs produce no ratio.
+  The same calculation feeds Grafana Live at source cadence and the Historical
+  Analysis dashboard at the fast publication rate;
 - maximum-accumulator-temperature slope and a diagnostic event for a 20 degC
   change within one second;
 - CAN9 longitudinal/lateral acceleration and GG points only when `ImuValid` is

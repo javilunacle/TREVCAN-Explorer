@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from .buffers import RawBuffer
+from .live import live_lines
 from .server import DBCDecoder, export_forever
 from .simulate import DBC_DIRECTORY, generate_frames
 from .transforms import SessionRegistry, TransformEngine
@@ -112,6 +113,75 @@ class TransformEngineTests(unittest.TestCase):
         decoder = DBCDecoder(bus_paths={"can1": [dbc_path]})
         plan = self.engine.prepare([(frame, decoder.decode(frame))])
         self.assertTrue(any("signal=Vehicle_Speed_mps" in line for line in plan.lines))
+
+    def test_slip_ratio_matches_in_live_and_history_using_real_vcu_frames(self):
+        dbc_path = DBC_DIRECTORY / "VCU.dbc"
+        decoder = DBCDecoder([dbc_path], bus_paths={"can0": [dbc_path], "can1": [dbc_path]})
+        message = decoder.databases[0][1].get_message_by_name("VCU_Traction_Control")
+        for bus in ("can0", "can1"):
+            for rear, front, expected in ((400, 400, 1.0), (500, 400, 1.25),
+                                          (200, 400, 0.5), (0, 400, 0.0)):
+                with self.subTest(bus=bus, rear=rear, front=front):
+                    signals = {signal.name: 0 for signal in message.signals}
+                    signals.update({"VCU_TC_Rear_Wheel_RPM": rear,
+                                    "VCU_TC_Avg_Front_RPM": front,
+                                    # Deliberately disagree with the reported ratio:
+                                    # these panels must calculate from wheel RPM.
+                                    "VCU_TC_Slip_Ratio": 9.0,
+                                    "VCU_TC_Front_Left_Valid": 1,
+                                    "VCU_TC_Front_Right_Valid": 1})
+                    frame = decoded(1, 1_100_000_000, "VCU.dbc",
+                                    message.name, signals, bus=bus)[0]
+                    frame.update(can_id=message.frame_id,
+                                 is_extended=message.is_extended_frame,
+                                 data=message.encode(signals))
+                    plan = self.engine.prepare([(frame, decoder.decode(frame))])
+                    slip = next(line for line in plan.lines if "signal=Slip_Ratio," in line)
+                    self.assertIn(f" value={expected},", slip)
+                    self.assertTrue(slip.endswith(" 1100000000"))
+                    self.assertIn(f"derived.Slip_Ratio={expected}", live_lines([frame], decoder))
+
+    def test_slip_ratio_omits_invalid_samples_without_reusing_other_frames(self):
+        valid = {"VCU_TC_Rear_Wheel_RPM": 500, "VCU_TC_Avg_Front_RPM": 400,
+                 "VCU_TC_Front_Left_Valid": 1, "VCU_TC_Front_Right_Valid": 1}
+        invalid = [
+            {**valid, "VCU_TC_Avg_Front_RPM": 0},
+            {**valid, "VCU_TC_Avg_Front_RPM": -1},
+            {**valid, "VCU_TC_Rear_Wheel_RPM": -1},
+            {**valid, "VCU_TC_Rear_Wheel_RPM": float("nan")},
+            {**valid, "VCU_TC_Avg_Front_RPM": float("inf")},
+            {**valid, "VCU_TC_Front_Left_Valid": 0},
+            {**valid, "VCU_TC_Front_Right_Valid": 0},
+            {key: value for key, value in valid.items() if key != "VCU_TC_Rear_Wheel_RPM"},
+            {key: value for key, value in valid.items() if key != "VCU_TC_Avg_Front_RPM"},
+            {key: value for key, value in valid.items() if key != "VCU_TC_Front_Left_Valid"},
+        ]
+        self.engine.commit(self.engine.prepare([
+            decoded(1, 1_000_000_000, "VCU.dbc", "VCU_Traction_Control", valid)]))
+        for signals in invalid:
+            with self.subTest(signals=signals):
+                frame, result = decoded(2, 1_100_000_000, "VCU.dbc",
+                                        "VCU_Traction_Control", signals)
+                plan = self.engine.prepare([(frame, result)])
+                self.assertFalse(any("signal=Slip_Ratio," in line for line in plan.lines))
+                class SampleDecoder:
+                    def decode(self, frame):
+                        return result
+                live = live_lines([frame], SampleDecoder())
+                self.assertNotIn("derived.Slip_Ratio=", live)
+                self.assertIn("signal.VCU_TC_", live)  # Raw decoded fields still flow.
+
+    def test_slip_ratio_history_is_rate_limited_and_retry_safe(self):
+        signals = {"VCU_TC_Rear_Wheel_RPM": 500, "VCU_TC_Avg_Front_RPM": 400,
+                   "VCU_TC_Front_Left_Valid": 1, "VCU_TC_Front_Right_Valid": 1}
+        inputs = [decoded(seq, timestamp, "VCU.dbc", "VCU_Traction_Control", signals)
+                  for seq, timestamp in enumerate(
+                      (1_000_000_000, 1_050_000_000, 1_100_000_000), start=1)]
+        plan = self.engine.prepare(inputs)
+        self.assertEqual(plan.lines, self.engine.prepare(inputs).lines)
+        self.assertEqual(len(plan.lines), 2)
+        self.engine.commit(plan)
+        self.assertEqual(self.engine.prepare([inputs[-1]]).lines, [])
 
     def test_positive_current_accumulates_charge_and_negative_accumulates_use(self):
         inputs = [
