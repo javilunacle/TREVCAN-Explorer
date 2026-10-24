@@ -26,7 +26,7 @@ def _stream_condition(stream):
 
 
 def _signal_query(condition, *, dbc=None, latest=False, table=False,
-                  aggregate=False, stream="real"):
+                  aggregate=False, stream="real", group_columns=("signal",)):
     filters = [
         'r._measurement == "can_signal"',
         'r._field == "value"',
@@ -35,11 +35,12 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False,
     ]
     if dbc:
         filters.append(f'r.dbc == "{dbc}"')
+    groups = ", ".join(f'"{column}"' for column in group_columns)
     query = (
         'from(bucket: "home")\n'
         '  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n'
         f"  |> filter(fn: (r) => {' and '.join(filters)})\n"
-        '  |> group(columns: ["signal"])'
+        f'  |> group(columns: [{groups}])'
     )
     if latest:
         query += '\n  |> last()'
@@ -53,7 +54,9 @@ def _signal_query(condition, *, dbc=None, latest=False, table=False,
             '\n  |> sort(columns: ["signal"])'
         )
     else:
-        query += '\n  |> keep(columns: ["_time", "_value", "signal"])'
+        columns = dict.fromkeys(("_time", "_value", "signal", *group_columns))
+        keep = ", ".join(f'"{column}"' for column in columns)
+        query += f'\n  |> keep(columns: [{keep}])'
     return query
 
 
@@ -98,7 +101,8 @@ def _field_defaults(unit=None, *, minimum=None, maximum=None, decimals=None):
 
 
 def timeseries(panel_id, title, condition, grid, *, dbc=None, unit=None,
-               description="", minimum=None, maximum=None, decimals=None):
+               description="", minimum=None, maximum=None, decimals=None,
+               group_columns=("signal",)):
     return {
         "id": panel_id,
         "title": title,
@@ -106,7 +110,8 @@ def timeseries(panel_id, title, condition, grid, *, dbc=None, unit=None,
         "description": description,
         "gridPos": grid,
         "datasource": DATASOURCE,
-        "targets": [_target(_signal_query(condition, dbc=dbc, aggregate=True))],
+        "targets": [_target(_signal_query(condition, dbc=dbc, aggregate=True,
+                                          group_columns=group_columns))],
         "fieldConfig": {
             "defaults": _field_defaults(
                 unit, minimum=minimum, maximum=maximum, decimals=decimals
@@ -635,7 +640,21 @@ def vcu_dashboard():
                      'r.message == "VCU_Config"',
                      {"x": 0, "y": 28, "w": 24, "h": 8}, dbc=dbc,
                      description="Grafana displays configuration feedback but does not transmit configuration commands."),
+        timeseries(15, "Launch speed: target vs actual RPM",
+                   'r.message == "VCU_Launch_Speed" and '
+                   '(r.signal == "VCU_LS_Target_RPM" or r.signal == "VCU_LS_Actual_RPM")',
+                   {"x": 0, "y": 36, "w": 24, "h": 8}, dbc=dbc,
+                   unit="suffix:RPM", decimals=0, group_columns=("car", "bus", "signal"),
+                   description="Target and actual RPM from VCU_Launch_Speed overlaid "
+                               "on one RPM axis. Actual RPM preserves its signed value."),
     ]
+    for signal, label, color in (("Target", "Target RPM", "#5794F2"),
+                                 ("Actual", "Actual RPM", "#FF9830")):
+        panels[-1]["fieldConfig"]["overrides"].append({
+            "matcher": {"id": "byName", "options": f"VCU_LS_{signal}_RPM"},
+            "properties": [{"id": "displayName", "value": label + " (${__field.labels.bus})"},
+                           {"id": "color", "value": {"mode": "fixed", "fixedColor": color}}],
+        })
     return _dashboard(
         "trevcan-vcu", "TREVCAN - VCU",
         "Read-only VCU state, pedals, sensor voltages, readiness, and CAN health.", panels,

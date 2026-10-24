@@ -98,7 +98,7 @@ def live_dashboard():
     traction = [item for item in catalog if item["dbc"] == "VCU.dbc" and
                 item["message"] == "VCU_Traction_Control"]
     slip = _panel(8, "Slip ratio (rear / front)",
-                  {"x": 0, "y": 14, "w": 24, "h": 7},
+                  {"x": 0, "y": 14, "w": 12, "h": 7},
                   _target(namespace, traction[0]["channel"], fields=["derived.Slip_Ratio"]),
                   unit="suffix:x")
     slip["targets"] = []
@@ -116,6 +116,30 @@ def live_dashboard():
         "validity flags and positive front RPM; invalid samples are omitted.")
     slip["fieldConfig"]["defaults"].update({"displayName": "Slip ratio", "decimals": 3})
     panels.append(slip)
+    launch_fields = ["signal.VCU_LS_Target_RPM", "signal.VCU_LS_Actual_RPM"]
+    launch_messages = [item for item in catalog if item["dbc"] == "VCU.dbc" and
+                       item["message"] == "VCU_Launch_Speed"]
+    launch = _panel(9, "Launch speed: target vs actual RPM",
+                    {"x": 12, "y": 14, "w": 12, "h": 7},
+                    _target(namespace, launch_messages[0]["channel"], fields=launch_fields),
+                    unit="suffix:RPM")
+    launch["targets"] = [
+        {**_target(namespace, message["channel"], fields=launch_fields),
+         "refId": chr(ord("A") + index)}
+        for index, message in enumerate(launch_messages)
+    ]
+    launch["description"] += (
+        " Target and actual RPM from the same VCU_Launch_Speed frame, "
+        "overlaid on one RPM axis. Actual RPM preserves its signed value.")
+    launch["fieldConfig"]["defaults"]["decimals"] = 0
+    for signal, label, color in (("Target", "Target RPM", "#5794F2"),
+                                 ("Actual", "Actual RPM", "#FF9830")):
+        launch["fieldConfig"]["overrides"].append({
+            "matcher": {"id": "byRegexp", "options": f"^signal\\.VCU_LS_{signal}_RPM(?: .*)?$"},
+            "properties": [{"id": "displayName", "value": label},
+                           {"id": "color", "value": {"mode": "fixed", "fixedColor": color}}],
+        })
+    panels.append(launch)
     selected = _panel(5, "Selected message — decoded samples",
                       {"x": 0, "y": 21, "w": 16, "h": 9},
                       _target(namespace, "${can_message}"))

@@ -23,7 +23,7 @@ preserves textual/enum labels. `stream/trevcan/can_frames` carries every fresh
 raw frame with its bus, ID, sequence, bytes, DBC, and decoded summary. Capture
 timestamps are preserved. Synthetic scenarios use `trevcan_synthetic` instead.
 
-The Live dashboard includes four key vehicle graphs, a slip-ratio graph, a static DBC-message
+The Live dashboard includes four key vehicle graphs, slip-ratio and launch-speed graphs, a static DBC-message
 selector, selected-message samples/latest values, and recent raw frames. Its
 one-minute view is limited to a browser buffer of at most 20,000 rows per query;
 it starts when the viewer subscribes. Use capture timestamps to assess stale
@@ -38,6 +38,12 @@ are 10% faster. Zero front RPM or invalid front-wheel readings omit the sample.
 Live uses `derived.Slip_Ratio` on the traction-control channel; history stores
 `Slip_Ratio` in `telemetry_derived`, with the existing test-session selector.
 Historical ratios are recorded after this update; earlier captures are not backfilled.
+
+**Launch speed: target vs actual RPM** appears in Live Telemetry and Historical
+VCU. It overlays `VCU_LS_Target_RPM` (blue) and `VCU_LS_Actual_RPM` (orange) from
+`VCU_Launch_Speed` on the same RPM axis. Actual RPM retains its sign. The Live
+panel subscribes to the message on both configured CAN buses; the Historical
+VCU panel queries the recorded numeric signals for the selected time range.
 
 The subsystem dashboards replace the original catch-all Systems graph. Signals
 with different units are split into separate panels, legends display the signal
