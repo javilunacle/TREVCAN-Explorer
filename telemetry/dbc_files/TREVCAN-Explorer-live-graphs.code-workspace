@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "TREVCAN-Explorer-live-graphs",
+			"path": "../.."
+		},
+		{
+			"name": "TREV4-Dashboard",
+			"path": "../../../TREV4-Dashboard"
+		},
+		{
+			"name": "caleb_rewind",
+			"path": "../../../../../reference/caleb_rewind"
+		}
+	],
+	"settings": {}
+}

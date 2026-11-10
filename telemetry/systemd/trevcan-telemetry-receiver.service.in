@@ -1,0 +1,17 @@
+[Unit]
+Description=TREVCAN off-car telemetry receiver
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+UMask=0077
+WorkingDirectory=__REPO_ROOT__
+Environment=HOME=__HOME__
+ExecStart=/bin/bash __REPO_ROOT__/telemetry/start_server_pi.sh
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

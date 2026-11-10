@@ -1,0 +1,96 @@
+VERSION ""
+
+NS_ :
+    NS_DESC_
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+    CAT_DEF_
+    CAT_
+    FILTER
+    BA_DEF_DEF_
+    EV_DATA_
+    ENVVAR_DATA_
+    SGTYPE_
+    SGTYPE_VAL_
+    BA_DEF_SGTYPE_
+    BA_SGTYPE_
+    SIG_TYPE_REF_
+    VAL_TABLE_
+    SIG_GROUP_
+    SIG_VALTYPE_
+    SIGTYPE_VALTYPE_
+    BO_TX_BU_
+    BA_DEF_REL_
+    BA_REL_
+    BA_DEF_DEF_REL_
+    BU_SG_REL_
+    BU_EV_REL_
+    BU_BO_REL_
+    SG_MUL_VAL_
+
+BS_:
+
+BU_: HVC
+
+BO_ 2151678448 HVC_IO_Summary: 7 HVC
+ SG_ HVC_SDC_Open : 0|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_IMD_Fault : 1|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_BMS_Fault : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Pack_Power_kW : 8|16@1- (0.01,0) [-327.68|327.67] "kW" Vector__XXX
+ SG_ HVC_Peak_Pack_Power_kW : 24|16@1- (0.01,0) [-327.68|327.67] "kW" Vector__XXX
+ SG_ HVC_Ref_Temp_C : 40|16@1- (0.01,0) [-327.68|327.67] "degC" Vector__XXX
+
+BO_ 2151678451 HVC_IO_Current: 6 HVC
+ SG_ HVC_Current_Low_A : 0|16@1- (0.01,0) [-327.68|327.67] "A" Vector__XXX
+ SG_ HVC_Current_High_A : 16|16@1- (0.01,0) [-327.68|327.67] "A" Vector__XXX
+ SG_ HVC_Pack_Current_A : 32|16@1- (0.01,0) [-327.68|327.67] "A" Vector__XXX
+
+BO_ 2151678455 HVC_IO_VSense: 8 HVC
+ SG_ HVC_Batt_Voltage_V : 0|32@1+ (0.001,0) [0|4294967.295] "V" Vector__XXX
+ SG_ HVC_Inv_Voltage_V : 32|32@1+ (0.001,0) [0|4294967.295] "V" Vector__XXX
+
+BO_ 2151678449 HVC_BMS_State: 7 HVC
+ SG_ HVC_BMS_State : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ HVC_Err_RefOverTemp : 8|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Err_ModuleTimeout : 9|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Err_BattFloating : 10|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Err_CurrSenseFloating : 11|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Err_BmbError : 12|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Err_BmsCanError : 13|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_Err_LvCanError : 14|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ HVC_BMB_Fault_Module : 40|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ HVC_BMB_Fault_State : 48|8@1+ (1,0) [0|6] "" Vector__XXX
+
+BO_ 2151678450 HVC_Errored_Panic: 0 HVC
+
+BO_ 2151678452 HVC_SOC: 8 HVC
+ SG_ HVC_SOC_Percent : 0|16@1+ (0.01,0) [0|100] "%" Vector__XXX
+ SG_ HVC_SOC_Capacity_As : 16|16@1+ (1,0) [0|65535] "A*s" Vector__XXX
+ SG_ HVC_SOC_Delta_As : 32|32@1- (1,0) [-2147483648|2147483647] "A*s" Vector__XXX
+
+BO_ 2151678453 HVC_ACC_Summary: 8 HVC
+ SG_ HVC_Acc_Volt_Min_mV : 0|16@1+ (1,0) [0|65535] "mV" Vector__XXX
+ SG_ HVC_Acc_Volt_Max_mV : 16|16@1+ (1,0) [0|65535] "mV" Vector__XXX
+ SG_ HVC_Acc_Temp_Min_C : 32|16@1- (0.1,0) [-3276.8|3276.7] "degC" Vector__XXX
+ SG_ HVC_Acc_Temp_Max_C : 48|16@1- (0.1,0) [-3276.8|3276.7] "degC" Vector__XXX
+
+BO_ 2151678456 HVC_Current_Limit: 8 HVC
+ SG_ HVC_Negative_Current_Limit_mA : 0|32@1+ (1,0) [0|4294967295] "mA" Vector__XXX
+ SG_ HVC_Positive_Current_Limit_mA : 32|32@1+ (1,0) [0|4294967295] "mA" Vector__XXX
+
+BO_ 2151678458 HVC_PL_Signal: 1 HVC
+ SG_ HVC_PL_Signal_Reason : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+
+VAL_ 2151678449 HVC_BMS_State 0 "PRE_INIT" 1 "RUNNING" 2 "CHARGING" 3 "BALANCING" 4 "ERRORED" ;
+VAL_ 2151678458 HVC_PL_Signal_Reason 0 "NORMAL_OPEN" 1 "NORMAL_CLOSED" 2 "BMS_ERRORED" 3 "BATT_FLOATING" 4 "CHARGING" ;
+VAL_ 2151678449 HVC_Err_RefOverTemp 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_Err_ModuleTimeout 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_Err_BattFloating 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_Err_CurrSenseFloating 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_Err_BmbError 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_Err_BmsCanError 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_Err_LvCanError 0 "Inactive" 1 "Active" ;
+VAL_ 2151678449 HVC_BMB_Fault_Module 255 "None" ;
+VAL_ 2151678449 HVC_BMB_Fault_State 0 "INIT" 1 "IDLE" 2 "CHARGING" 3 "DISCHARGING" 4 "BALANCING" 5 "FAULT" 6 "RESERVED" ;
