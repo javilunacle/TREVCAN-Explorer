@@ -1,4 +1,4 @@
-"""Pi multi-bus capture with small RAM batches and fresh-data reconnects."""
+"""Forward dashboard socket records in small TCP batches with fresh-data reconnects."""
 
 import argparse
 import asyncio
@@ -15,10 +15,9 @@ from .canmanager_input import DEFAULT_SOCKET_NAME, capture_canmanager_forever
 
 # Data flow through this process:
 #   Input -> bounded capture queue -> capture_writer -> CarBuffer -> TCP sender.
-# The installed service uses CANManager input: the dashboard receives SocketCAN
-# frames, decodes them, and sends raw/decoded pairs through the local socket.
-# Direct --interface mode instead reads raw SocketCAN frames in capture_forever.
-# Both input paths feed the same queue, buffer, and sender below.
+# The dashboard owns CAN reception and decoding. This process receives its
+# raw/decoded records through the local socket and forwards them to telemetry.
+# Explicit simulation/replay modes feed the same queue for off-car validation.
 
 
 async def send_forever(buffer, host, port, token=None, stop=None, window_size=64):
@@ -114,10 +113,9 @@ def load_simulation_frames(path):
     return frames
 
 
-async def capture_forever(queue, *, interface=None, simulate_rate=None,
-                          simulate_file=None, replay_rate=50):
-    # These inputs are selected for standalone capture or testing. The installed
-    # CANManager input uses capture_canmanager_forever instead (see run below).
+async def simulate_forever(queue, *, simulate_rate=None,
+                           simulate_file=None, replay_rate=50):
+    """Generate or replay test frames without opening a vehicle CAN interface."""
     if simulate_file:
         # Replay raw frames from a file with a fresh timestamp for each sample.
         frames = load_simulation_frames(simulate_file)
@@ -140,29 +138,6 @@ async def capture_forever(queue, *, interface=None, simulate_rate=None,
                              len(data), time.time_ns()))
             index += 1
             await asyncio.sleep(1 / simulate_rate)
-    else:
-        # --interface selects direct SocketCAN capture. Each interface gets its
-        # own capture task, so --interface can0 --interface can1 reads both buses.
-        try:
-            import can
-        except ImportError as exc:
-            raise RuntimeError("python-can is required for SocketCAN capture") from exc
-        # Open a receive socket for the selected, already configured interface.
-        # Frames here are still raw: no DBC decoding happens in this function.
-        with can.Bus(interface="socketcan", channel=interface) as bus:
-            while True:
-                # recv waits up to 0.5 seconds for one CAN frame, returning None
-                # on timeout. A worker thread handles that blocking wait so the
-                # asyncio loop can keep batching and sending at the same time.
-                msg = await asyncio.to_thread(bus.recv, 0.5)
-                if msg is not None:
-                    # Keep the source bus, ID, payload bytes, flags, DLC, and
-                    # local receive time together as one capture record. There
-                    # is no sequence yet; capture_writer passes it to CarBuffer.
-                    # Backpressure is visible here; a full queue may cause kernel CAN loss.
-                    await queue.put((interface, msg.arbitration_id, bytes(msg.data), msg.is_extended_id,
-                                     msg.is_remote_frame, msg.is_fd, msg.is_error_frame,
-                                     msg.dlc, time.time_ns()))
 
 
 async def capture_writer(buffer, queue, batch_size=256, flush_ms=20, status_interval=5):
@@ -203,20 +178,12 @@ async def run(args):
         # Cancelling this group also stops its input and sender tasks together.
         async with asyncio.TaskGroup() as group:
             if args.canmanager_socket is not None:
-                # Live car input now comes from the dashboard's single decoder.
-                # Batching, sequencing, and the off-car TCP sender stay below.
-                # Its local socket receiver puts raw/decoded pairs into queue.
+                # Receive each raw/decoded pair from the dashboard's socket.
                 group.create_task(capture_canmanager_forever(queue, args.canmanager_socket))
             else:
-                # Preserve standalone SocketCAN capture and synthetic test inputs.
-                # Hardware mode creates one reader per requested interface;
-                # simulation mode creates a single reader with interface=None.
-                interfaces = args.interface or [None]
-                for interface in interfaces:
-                    group.create_task(capture_forever(queue, interface=interface,
-                                                      simulate_rate=args.simulate_rate,
-                                                      simulate_file=args.simulate_file,
-                                                      replay_rate=args.replay_rate))
+                group.create_task(simulate_forever(queue, simulate_rate=args.simulate_rate,
+                                                  simulate_file=args.simulate_file,
+                                                  replay_rate=args.replay_rate))
             # Both source choices join the same remaining pipeline here.
             group.create_task(capture_writer(buffer, queue, args.batch_size,
                                            args.flush_ms, args.status_interval))
@@ -227,21 +194,19 @@ async def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pi raw-CAN capture and RAM-batched sender")
+    parser = argparse.ArgumentParser(
+        description="Receive dashboard CAN records over a local socket and forward TCP batches")
     parser.add_argument("--host", default="127.0.0.1", help="telemetry receiver host")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--token", default=os.getenv("TELEMETRY_TOKEN"),
-                        help="shared demo token (or TELEMETRY_TOKEN environment variable)")
+                        help="shared telemetry token (or TELEMETRY_TOKEN environment variable)")
     parser.add_argument("--stream-id",
                         help="optional stream prefix; each sender run adds a unique suffix")
-    # Select one input mode. Repeat --interface within hardware mode to capture
-    # multiple buses; CANManager mode already carries both buses through one socket.
+    # Both vehicle buses arrive through one dashboard socket by default.
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--canmanager-socket", nargs="?",
                         const=os.getenv("TREVCAN_TELEMETRY_SOCKET", DEFAULT_SOCKET_NAME),
-                        metavar="NAME", help="receive raw/decoded pairs from CANManager (Linux)")
-    source.add_argument("--interface", action="append",
-                        help="SocketCAN interface; repeat for can0 and can1")
+                        metavar="NAME", help="dashboard socket name (default input; Linux)")
     source.add_argument("--simulate-rate", type=float, help="synthetic frames per second")
     source.add_argument("--simulate-file", help="loop a raw JSONL replay file; no CAN bus transmission")
     parser.add_argument("--replay-rate", type=float, default=50,
@@ -256,12 +221,12 @@ def main():
     parser.add_argument("--status-interval", type=float, default=5,
                         help="seconds between buffer status log lines (default: 5)")
     args = parser.parse_args()
-    if (args.canmanager_socket is None and args.interface is None and
+    if (args.canmanager_socket is None and
             args.simulate_rate is None and args.simulate_file is None):
-        parser.error("provide --canmanager-socket, --interface, --simulate-rate, or --simulate-file")
+        args.canmanager_socket = os.getenv("TREVCAN_TELEMETRY_SOCKET", DEFAULT_SOCKET_NAME)
     if args.canmanager_socket is not None:
         if sys.platform != "linux":
-            parser.error("--canmanager-socket requires Linux")
+            parser.error("dashboard socket input requires Linux; use simulation/replay for local testing")
         if not args.canmanager_socket or "\0" in args.canmanager_socket:
             parser.error("provide a nonempty socket name without NUL characters")
     if (args.queue_size < 1 or args.window_size < 1 or args.batch_size < 1 or

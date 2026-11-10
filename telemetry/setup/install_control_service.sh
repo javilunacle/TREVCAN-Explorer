@@ -7,8 +7,9 @@ if [[ "${EUID}" -eq 0 ]]; then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
-template="$script_dir/systemd/trevcan-telemetry-control.service.in"
+telemetry_dir="$(cd -- "$script_dir/.." && pwd)"
+repo_root="$(cd -- "$telemetry_dir/.." && pwd)"
+template="$telemetry_dir/systemd/trevcan-telemetry-control.service.in"
 unit_dir="$HOME/.config/systemd/user"
 unit_path="$unit_dir/trevcan-telemetry-control.service"
 env_file="$repo_root/.env.telemetry"
@@ -29,11 +30,11 @@ fi
 }
 [[ -r "$env_file" ]] || { echo "Missing $env_file" >&2; exit 1; }
 [[ -r "$HOME/.config/trevcan/control_ed25519" ]] || {
-    echo "Run bash telemetry/setup_control_pi.sh first." >&2
+    echo "Run bash telemetry/setup/setup_control_pi.sh first." >&2
     exit 1
 }
 [[ -r "$HOME/.config/trevcan/control_known_hosts" ]] || {
-    echo "Run bash telemetry/setup_control_pi.sh first." >&2
+    echo "Run bash telemetry/setup/setup_control_pi.sh first." >&2
     exit 1
 }
 

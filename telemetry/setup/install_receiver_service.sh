@@ -7,8 +7,9 @@ if [[ "${EUID}" -eq 0 ]]; then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
-template="$script_dir/systemd/trevcan-telemetry-receiver.service.in"
+telemetry_dir="$(cd -- "$script_dir/.." && pwd)"
+repo_root="$(cd -- "$telemetry_dir/.." && pwd)"
+template="$telemetry_dir/systemd/trevcan-telemetry-receiver.service.in"
 env_file="$repo_root/.env.telemetry"
 python_bin="$repo_root/.venv/bin/python"
 unit_dir="$HOME/.config/systemd/user"

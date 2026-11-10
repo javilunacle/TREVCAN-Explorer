@@ -4,12 +4,11 @@ Vehicle telemetry from the car Pi to a telemetry Pi, with Grafana Live for
 current samples and InfluxDB for historical analysis.
 
 ```text
-Car Pi: CANManager decode -> dashboard + raw/decoded TCP records
-                                               |
-Telemetry Pi: process_frame() calculates once --+
-                 |                             |
-                 v                             v
-            Grafana Live                InfluxDB history
+Car Pi: dashboard CANManager -> local socket -> telemetry.car
+                                                    |
+                                                   TCP
+                                                    |
+Telemetry Pi: receiver -> calculations -> Grafana Live + InfluxDB history
 ```
 
 Disconnected data is discarded. Both Pis use bounded RAM buffers and resume
@@ -20,7 +19,7 @@ Setup and test-day operation are documented in [telemetry/README.md](telemetry/R
 
 ## Repository layout
 
-- `telemetry/car.py`: multi-bus SocketCAN capture and sender.
+- `telemetry/car.py`: dashboard socket input, RAM batching, and TCP sender.
 - `telemetry/server.py`: receiver, one-time preparation, and historical export.
 - `telemetry/live.py`: independent Grafana Live publisher.
 - `telemetry/buffers.py`: bounded RAM queues.
@@ -28,6 +27,7 @@ Setup and test-day operation are documented in [telemetry/README.md](telemetry/R
 - `telemetry/transforms.py` and `transform_policies.json`: timestamp-based calculations.
 - `telemetry/control.py`: supervised test start/stop page.
 - `telemetry/grafana/`: streaming and historical dashboards.
+- `telemetry/setup/`: Pi service installers and remote-control setup.
 - `telemetry/scenario_runner.py` and `simulate.py`: synthetic validation tools.
 - `docker-compose.telemetry-pi.yml`: Grafana and InfluxDB deployment.
 

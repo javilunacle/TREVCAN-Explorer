@@ -7,7 +7,7 @@ to Grafana Live and InfluxDB. Raw-only diagnostic inputs decode once on receipt.
 
 ## Architecture
 
-- `telemetry/car.py`: SocketCAN capture, simulation/replay input, TCP sender.
+- `telemetry/car.py`: dashboard socket input, simulation/replay input, TCP sender.
 - `telemetry/buffers.py`: bounded RAM batching with age/capacity limits.
 - `telemetry/server.py`: authenticated receiver, DBC routing, historical export.
 - `telemetry/live.py`: independent Grafana Live HTTP publisher.
@@ -15,6 +15,7 @@ to Grafana Live and InfluxDB. Raw-only diagnostic inputs decode once on receipt.
 - `telemetry/transforms.py`: source-timestamp integrals, derivatives, and diagnostics.
 - `telemetry/grafana/`: provisioned Live and historical dashboards.
 - `telemetry/control.py`: supervised test start/stop controls.
+- `telemetry/setup/`: Pi service installers and remote-control setup.
 - `telemetry/systemd/`: Pi service templates.
 
 ## Runtime policy

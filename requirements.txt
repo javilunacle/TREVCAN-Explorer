@@ -1,3 +1,2 @@
 # Runtime dependencies for the telemetry pipeline.
-python-can>=4.4.0
 cantools>=39.4.0

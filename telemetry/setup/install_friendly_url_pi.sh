@@ -7,7 +7,8 @@ if [[ "${EUID}" -eq 0 ]]; then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-nginx_source="$script_dir/nginx/trevcan-telemetry.conf"
+telemetry_dir="$(cd -- "$script_dir/.." && pwd)"
+nginx_source="$telemetry_dir/nginx/trevcan-telemetry.conf"
 nginx_target="/etc/nginx/sites-available/trevcan-telemetry"
 nginx_enabled="/etc/nginx/sites-enabled/trevcan-telemetry"
 

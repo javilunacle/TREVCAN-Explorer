@@ -146,12 +146,11 @@ class TransformEngine:
         self._signal_sources = {}
         self._message_sources = {}
         for source_name, source in self.policy["sources"].items():
-            buses = source.get("buses", [source.get("bus")])
-            for bus in buses:
-                message_key = (bus, source.get("dbc"), source.get("message"))
-                if "signal" in source:
-                    self._signal_sources.setdefault(message_key, {})[source["signal"]] = source_name
-                else:
+            if "signal" in source:
+                self._signal_sources[source["signal"]] = source_name
+            else:
+                for bus in source.get("buses", [source.get("bus")]):
+                    message_key = (bus, source.get("dbc"), source.get("message"))
                     self._message_sources[message_key] = source_name
 
     def _validate_policy(self):
@@ -183,6 +182,7 @@ class TransformEngine:
         return {
             "policy_version": self.policy["version"],
             "last_emit": {},
+            "last_input_t": {},
             "speed": {"last_t": None, "last_v": None, "distance_m": 0.0,
                       "window": []},
             "temperature": {"window": [], "last_warning_ns": None},
@@ -391,13 +391,8 @@ class TransformEngine:
             electrical["last_current_t"], electrical["last_current"] = timestamp, value
             electrical["current_t"], electrical["current"] = timestamp, value
 
-    def _handle_electrical(self, points, state, frame, source_name, value, session_id):
-        timestamp = frame["timestamp_ns"]
+    def _handle_electrical(self, points, state, frame, session_id):
         electrical = state["electrical"]
-        if source_name == "pack_voltage":
-            electrical["voltage_t"], electrical["voltage"] = timestamp, value
-        else:
-            self._handle_current(state, timestamp, value)
         voltage_t, current_t = electrical["voltage_t"], electrical["current_t"]
         if voltage_t is None or current_t is None:
             return
@@ -426,10 +421,12 @@ class TransformEngine:
             electrical["last_power_t"], electrical["last_power"] = timestamp, power
         common = {"stream_id": frame["stream_id"], "session_id": session_id,
                   "timestamp_ns": timestamp, "policy": "medium"}
+        voltage_signal = self.policy["sources"]["pack_voltage"]["signal"]
+        current_signal = self.policy["sources"]["pack_current"]["signal"]
         values = [
-            ("Pack_Power_W", power, "W", "HVC_Batt_Voltage_V+HVC_Pack_Current_A"),
-            ("Charge_Added_Ah", electrical["charge_added_ah"], "Ah", "HVC_Pack_Current_A"),
-            ("Charge_Removed_Ah", electrical["charge_removed_ah"], "Ah", "HVC_Pack_Current_A"),
+            ("Pack_Power_W", power, "W", f"{voltage_signal}+{current_signal}"),
+            ("Charge_Added_Ah", electrical["charge_added_ah"], "Ah", current_signal),
+            ("Charge_Removed_Ah", electrical["charge_removed_ah"], "Ah", current_signal),
             ("Energy_Charged_Wh", electrical["energy_charged_wh"], "Wh", "Pack_Power_W"),
             ("Energy_Used_Wh", electrical["energy_used_wh"], "Wh", "Pack_Power_W"),
             ("Net_Energy_Change_Wh", electrical["net_energy_wh"], "Wh", "Pack_Power_W"),
@@ -498,8 +495,7 @@ class TransformEngine:
         source_key = (frame.get("bus", "unknown"), frame.get("dbc", ""),
                       frame.get("message", ""))
         message_source = self._message_sources.get(source_key)
-        signal_sources = self._signal_sources.get(source_key, {})
-        if message_source is None and not signal_sources:
+        if message_source is None and self._signal_sources.keys().isdisjoint(signals):
             return []  # Ordinary decoded messages need no calculation state.
         points = []
         session_id = self.sessions.session_for(frame["timestamp_ns"], session_catalog)
@@ -508,16 +504,29 @@ class TransformEngine:
             self._handle_alignment(points, state, frame, signals, session_id)
         elif message_source == "imu_data":
             self._handle_imu(points, state, frame, signals, session_id)
-        # Visit only configured inputs, rather than scanning every BMS or
-        # inverter signal when that message has no relevant calculation.
-        for signal_name, source_name in signal_sources.items():
+        # Signal names identify scalar inputs regardless of bus or DBC filename.
+        # Keep only newer samples for calculations; raw recording is unaffected.
+        electrical_updated = False
+        timestamp = frame["timestamp_ns"]
+        for signal_name, source_name in self._signal_sources.items():
             value = _numeric(signals.get(signal_name))
             if value is None:
                 continue
+            previous_t = state["last_input_t"].get(signal_name)
+            if previous_t is not None and timestamp <= previous_t:
+                continue
+            state["last_input_t"][signal_name] = timestamp
             if source_name == "vehicle_speed":
                 self._handle_speed(points, state, frame, value, session_id, signal_name)
-            elif source_name in ("pack_voltage", "pack_current"):
-                self._handle_electrical(points, state, frame, source_name, value, session_id)
+            elif source_name == "pack_voltage":
+                state["electrical"]["voltage_t"] = timestamp
+                state["electrical"]["voltage"] = value
+                electrical_updated = True
+            elif source_name == "pack_current":
+                self._handle_current(state, timestamp, value)
+                electrical_updated = True
             elif source_name == "accumulator_temp_max":
                 self._handle_temperature(points, state, frame, value, session_id)
+        if electrical_updated:
+            self._handle_electrical(points, state, frame, session_id)
         return points

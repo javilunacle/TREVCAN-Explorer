@@ -7,8 +7,9 @@ if [[ "${EUID}" -eq 0 ]]; then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
-template="$script_dir/systemd/trevcan-telemetry-car.service.in"
+telemetry_dir="$(cd -- "$script_dir/.." && pwd)"
+repo_root="$(cd -- "$telemetry_dir/.." && pwd)"
+template="$telemetry_dir/systemd/trevcan-telemetry-car.service.in"
 app_root="$HOME/.local/share/trevcan"
 package_dir="$app_root/telemetry"
 config_dir="$HOME/.config/trevcan"
@@ -63,8 +64,7 @@ done
     echo "No usable Python interpreter found." >&2
     exit 1
 }
-# The default CANManager socket input uses only the Python standard library.
-# python-can is needed only when manually selecting direct --interface capture.
+# The sender's socket and simulation inputs use only the Python standard library.
 
 token="${TELEMETRY_TOKEN:-}"
 if [[ -z "$token" && -r "$config_path" ]]; then
@@ -82,11 +82,11 @@ if [[ ! "$token" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
 fi
 
 mkdir -p "$package_dir" "$config_dir" "$unit_dir"
-install -m 0644 "$script_dir/__init__.py" "$package_dir/__init__.py"
-install -m 0644 "$script_dir/common.py" "$package_dir/common.py"
-install -m 0644 "$script_dir/buffers.py" "$package_dir/buffers.py"
-install -m 0644 "$script_dir/car.py" "$package_dir/car.py"
-install -m 0644 "$script_dir/canmanager_input.py" "$package_dir/canmanager_input.py"
+install -m 0644 "$telemetry_dir/__init__.py" "$package_dir/__init__.py"
+install -m 0644 "$telemetry_dir/common.py" "$package_dir/common.py"
+install -m 0644 "$telemetry_dir/buffers.py" "$package_dir/buffers.py"
+install -m 0644 "$telemetry_dir/car.py" "$package_dir/car.py"
+install -m 0644 "$telemetry_dir/canmanager_input.py" "$package_dir/canmanager_input.py"
 
 temporary_env="$(mktemp)"
 temporary_unit="$(mktemp)"

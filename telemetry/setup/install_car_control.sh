@@ -32,7 +32,7 @@ marker="trevcan-telemetry-control"
     exit 1
 }
 [[ -r "$unit" ]] || {
-    echo "Install the car telemetry service first: bash telemetry/install_car_service.sh" >&2
+    echo "Install the car telemetry service first: bash telemetry/setup/install_car_service.sh" >&2
     exit 1
 }
 

@@ -40,30 +40,15 @@
   },
   "sources": {
     "vehicle_speed": {
-      "buses": [
-        "can0",
-        "can1"
-      ],
-      "dbc": "VCU.dbc",
-      "message": "VCU_Summary",
       "signal": "VCU_Speed_MPH"
     },
     "pack_voltage": {
-      "bus": "can0",
-      "dbc": "hvc.dbc",
-      "message": "HVC_IO_VSense",
-      "signal": "HVC_Batt_Voltage_V"
+      "signal": "HVC_Pack_Voltage"
     },
     "pack_current": {
-      "bus": "can0",
-      "dbc": "hvc.dbc",
-      "message": "HVC_IO_Current",
-      "signal": "HVC_Pack_Current_A"
+      "signal": "HVC_Pack_Current_Hi"
     },
     "accumulator_temp_max": {
-      "bus": "can0",
-      "dbc": "hvc.dbc",
-      "message": "HVC_ACC_Summary",
       "signal": "HVC_Acc_Temp_Max_C"
     },
     "imu_alignment": {

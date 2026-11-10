@@ -25,7 +25,7 @@ car can0/can1
        history: the same samples -> InfluxDB -> historical viewers and CSV exports
 ```
 
-The car service now uses `--canmanager-socket`. The dashboard's `CANManager`
+The car sender defaults to the dashboard socket. The dashboard's `CANManager`
 owns SocketCAN and must be running to supply frames; telemetry keeps its own
 process, bounded RAM buffer, batching, ACK handling, and TCP sender. Each outgoing
 frame retains the original raw fields and adds `decoded`, `dbc`, `message`, and
@@ -50,32 +50,31 @@ processes to override it. A manual sender can be started with:
 python3 -m telemetry.car --canmanager-socket --host 192.168.0.136
 ```
 
-Keep the existing `TELEMETRY_TOKEN` configuration. For standalone diagnostics,
-`--interface can0 --interface can1` still selects direct raw-only SocketCAN
-capture. Replay and synthetic inputs are unchanged. The installed car service
-selects the CANManager input; reinstall it when updating an existing car Pi.
+Keep the existing `TELEMETRY_TOKEN` configuration. The `--canmanager-socket` flag
+is optional; use `--canmanager-socket NAME` to choose a different socket.
+`--simulate-rate` and `--simulate-file` explicitly select off-car test inputs.
+The sender does not open vehicle CAN interfaces. Reinstall the car service
+when updating an existing car Pi so its installed Python files are refreshed.
 
 The car dashboard uses the `caleb_rewind` layout (`python3 -m app.main`).
 Its existing editor and `config/dbc_catalog.json` select DBCs per bus, including
 their duplicate-ID priorities and reload behavior. CANManager decodes numeric
-values once, derives enum display labels by lookup, and forwards both. Non-finite
+values for gauges and enum labels for display, then forwards both. Non-finite
 decoded floats become JSON `null` on the wire; dashboard values are unchanged.
 
 The dashboard speed gauge and telemetry speed calculations both use
 `VCU.dbc / VCU_Summary / VCU_Speed_MPH`, scaled at 0.01 mph per raw count.
 The previous `DAQBus.dbc / VCU_Speed` mismatch does not apply to this version.
 
-Calculated sources must match the car's actual decoded signal names, units,
-DBC filenames, and buses. The checked-in can0 catalog gives `hvc-2.dbc` and
-`master.dbc` equal priority, so master loads later and overrides HVC definitions.
-Its `HVC_IO_Current` publishes `HVC_Pack_Current_Hi` and
-`HVC_Pack_Current_Lo` in A, and its pack voltage is already in V.
+Single-signal calculations match decoded signal names from either bus, without
+requiring a DBC filename or message name. Mirrored inputs must describe the same
+measurement in the same units. Older or identical timestamps do not advance
+calculation state; raw samples from both buses are still recorded separately.
 
-The dashboard's `hvc-2.dbc` and can1 `hvc.dbc` use mA/mV. The telemetry reference
-`dbc_files/hvc.dbc` describes a different current payload with a combined
-`HVC_Pack_Current_A` signal. The car requires a confirmed rule combining its
-Hi/Lo readings before aligning the electrical bindings. Convert mA/mV to
-A/V only for inputs that use those units.
+Pack current uses `HVC_Pack_Current_Hi` directly, with no Hi/Lo switching.
+Pack power is `HVC_Pack_Voltage * HVC_Pack_Current_Hi`. The dashboard's decoded
+values are already in volts and amps. Signals named in mA/mV are different inputs
+and are not automatically substituted or converted. IMU message routing is unchanged.
 
 CANManager's car catalog also includes the unchanged
 `BMS-Firmware-RTOS-Complete.dbc` on `can0` and
@@ -93,9 +92,8 @@ each frame through its CAN ID and message name, including when modules reuse
 signal names. Unknown frames retain an empty decoded dictionary and are
 not decoded again.
 
-The pack-current Hi/Lo combination rule is still pending. Both channels are
-forwarded individually; HVC calculation bindings remain unchanged until
-that rule is confirmed.
+Both current channels remain in the raw/decoded records; pack calculations use
+only the Hi channel selected above.
 
 The default policy is **discard disconnected data and resume fresh**. Neither Pi
 opens a SQLite spool in the active pipeline. ACKs confirm acceptance into RAM,
@@ -206,7 +204,7 @@ WebSockets; no Telegraf service is required. See the official
 Install the receiver service. Do not add `--enable-at-boot`:
 
 ```bash
-bash telemetry/install_receiver_service.sh
+bash telemetry/setup/install_receiver_service.sh
 systemctl --user is-enabled trevcan-telemetry-receiver.service
 ```
 
@@ -235,8 +233,9 @@ Create a local environment for the car sender:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install python-can
 ```
+
+The car sender uses only the Python standard library; no extra pip packages are needed.
 
 The installer uses this checkout's `.venv/bin/python`. Set
 `TREVCAN_CAR_PYTHON` explicitly if another Python environment is required.
@@ -244,7 +243,7 @@ The installer uses this checkout's `.venv/bin/python`. Set
 Install the car service, again without `--enable-at-boot`:
 
 ```bash
-bash telemetry/install_car_service.sh 192.168.0.136
+bash telemetry/setup/install_car_service.sh 192.168.0.136
 ```
 
 When prompted, enter the exact `TELEMETRY_TOKEN` from the telemetry Pi. The
@@ -268,7 +267,7 @@ Return to the telemetry Pi:
 ```bash
 ssh pi@192.168.0.136
 cd ~/TREVCAN-Telemetry
-bash telemetry/setup_control_pi.sh 192.168.0.145 trevor
+bash telemetry/setup/setup_control_pi.sh 192.168.0.145 trevor
 ```
 
 The script shows the scanned car-Pi SSH fingerprint. In a separate car-Pi
@@ -288,7 +287,7 @@ obsolete poweroff permission.
 Install TREVCAN Telemetry Tools, enable startup at boot, and start it now:
 
 ```bash
-bash telemetry/install_control_service.sh --start-now
+bash telemetry/setup/install_control_service.sh --start-now
 systemctl --user status trevcan-telemetry-control.service --no-pager
 ```
 
@@ -304,7 +303,7 @@ systemctl --user enable --now trevcan-telemetry-control.service
 Install the friendly LAN address once:
 
 ```bash
-bash telemetry/install_friendly_url_pi.sh
+bash telemetry/setup/install_friendly_url_pi.sh
 ```
 
 This sets the telemetry Pi hostname to `telemetrypi`, enables mDNS through
@@ -460,6 +459,9 @@ warnings are diagnostic engineering aids, not safety alarms or interlocks.
 
 ## Synthetic end-to-end scenarios
 
+Electrical scenarios include decoded dashboard signal names alongside their
+reference raw frames, so they exercise the same signal-based calculations.
+
 Run synthetic scenarios on the **telemetry Pi**, with the real car test ended.
 They use a unique `scenario-*` stream ID and the normal authenticated TCP receiver,
 DBC decoder, transform worker, InfluxDB, and Grafana path. They never open
@@ -556,8 +558,8 @@ change buffering merely to hide decode warnings.
 
 ### Existing car applications consume high CPU
 
-The installed telemetry sender receives the dashboard CANManager's raw/decoded
-records; only standalone `--interface` mode reads SocketCAN independently.
+The telemetry sender receives the dashboard CANManager's raw/decoded records
+through the local socket. CAN reception and decoding stay in the dashboard.
 Do not disable unknown vehicle services without team approval.
 Coordinate with their owners if combined CPU load or temperature affects testing.
 
@@ -573,13 +575,13 @@ disabled-at-boot by default:
 systemctl --user stop trevcan-telemetry-receiver.service
 cd ~/TREVCAN-Telemetry
 git pull --ff-only
-bash telemetry/install_receiver_service.sh
-bash telemetry/install_control_service.sh --start-now
+bash telemetry/setup/install_receiver_service.sh
+bash telemetry/setup/install_control_service.sh --start-now
 
 # Car Pi
 cd ~/TREVCAN-Telemetry
 git pull --ff-only
-bash telemetry/install_car_service.sh 192.168.0.136
+bash telemetry/setup/install_car_service.sh 192.168.0.136
 ```
 
 Only use `--enable-at-boot` later, after competition startup behavior and

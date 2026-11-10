@@ -85,7 +85,7 @@ class FrameFactory:
                 f"unknown {message_name} signals: {', '.join(sorted(unknown))}")
         values.update(overrides)
         data = message.encode(values, strict=True)
-        return {
+        frame = {
             "bus": bus,
             "can_id": message.frame_id,
             "is_extended": bool(message.is_extended_frame),
@@ -95,6 +95,13 @@ class FrameFactory:
             "dlc": len(data),
             "data": data,
         }
+        # Electrical fixtures supply the dashboard's selected signal names.
+        # Reference raw bytes remain available for capture/history checks.
+        if message_name == "HVC_IO_Current":
+            frame["decoded"] = {"HVC_Pack_Current_Hi": values["HVC_Current_High_A"]}
+        elif message_name == "HVC_IO_VSense":
+            frame["decoded"] = {"HVC_Pack_Voltage": values["HVC_Batt_Voltage_V"]}
+        return frame
 
 
 def _event(factory, offset, label, message, **signals):
@@ -238,7 +245,7 @@ def build_scenarios(factory=None):
         "stale-electrical-pair": Scenario(
             "stale-electrical-pair",
             "Voltage/current separated by 400 ms; the 200 ms pairing gate rejects power.",
-            stale_electrical, ("HVC_Batt_Voltage_V", "HVC_Pack_Current_A"),
+            stale_electrical, ("HVC_Pack_Voltage", "HVC_Pack_Current_Hi"),
             ("Pack_Power_W",)),
         "hvc-faults": Scenario(
             "hvc-faults", "Synthetic HVC error bits for the read-only fault table.",
@@ -246,7 +253,7 @@ def build_scenarios(factory=None):
         "decode-mismatch": Scenario(
             "decode-mismatch",
             "Valid raw CAN frame whose DLC disagrees with the DBC; remains raw/undecoded.",
-            decode_mismatch, ("can_frame",), ("HVC_Pack_Current_A",)),
+            decode_mismatch, ("can_frame",), ("HVC_Pack_Current_Hi",)),
         "all": Scenario(
             "all", "Run the positive-path calculations, one warning, faults, and DLC mismatch.",
             all_events,
@@ -264,7 +271,7 @@ def _append_event(buffer, event):
         frame["can_id"], frame["data"], bus=frame["bus"],
         is_extended=frame["is_extended"], is_remote=frame["is_remote"],
         is_fd=frame["is_fd"], is_error=frame["is_error"], dlc=frame["dlc"],
-        timestamp_ns=time.time_ns())
+        timestamp_ns=time.time_ns(), decoded=frame.get("decoded"))
 
 
 async def _capture_events(buffer, scenario):
