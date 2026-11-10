@@ -40,16 +40,17 @@ def channel_catalog():
                 databases[filename] = cantools.database.load_file(
                     DBC_DIRECTORY / filename, strict=False)
             for message in databases[filename].messages:
-                channel = live_measurement(bus, message.frame_id, message.is_extended_frame)
                 # These inverter definitions match CANManager exactly; use
-                # its source filename in selector labels. Channels stay bus/ID based.
+                # its source filename in selector labels.
                 source = "Inverter.dbc" if filename == "BMS-Inverter-Only.dbc" else filename
-                catalog.setdefault(channel, {
-                    "bus": bus, "dbc": source, "message": message.name,
-                    "signals": {signal.name for signal in message.signals},
-                    "channel": channel,
-                })
-    return sorted(catalog.values(), key=lambda item: (item["bus"], item["message"]))
+                for signal in message.signals:
+                    channel = live_measurement(
+                        bus, signal.name, message.frame_id, message.is_extended_frame)
+                    catalog.setdefault(channel, {
+                        "bus": bus, "dbc": source, "message": message.name,
+                        "signal": signal.name, "channel": channel,
+                    })
+    return sorted(catalog.values(), key=lambda item: (item["bus"], item["message"], item["signal"]))
 
 
 def _target(namespace, channel, *, fields=None):
@@ -83,16 +84,16 @@ def live_dashboard():
     namespace = stream_namespace(os.getenv("GRAFANA_LIVE_URL") or
                                  "http://127.0.0.1:3000/api/live/push/trevcan")
     catalog = channel_catalog()
-    options = [{"text": f"{item['bus']} / {item['dbc']} / {item['message']}",
+    options = [{"text": f"{item['bus']} / {item['dbc']} / {item['message']} / {item['signal']}",
                 "value": item["channel"], "selected": False} for item in catalog]
     current = options[0]
     # Prefer the actual speed message instead of assuming a firmware CAN ID.
     speed = next((item for item in catalog if item["bus"] == "can0" and
-                  "VCU_Speed_MPH" in item["signals"]), None)
+                  item["signal"] == "VCU_Speed_MPH"), None)
     if speed:
         current = next(item for item in options if item["value"] == speed["channel"])
     current["selected"] = True
-    variable = {"name": "can_message", "label": "CAN message", "type": "custom",
+    variable = {"name": "can_signal", "label": "CAN signal", "type": "custom",
                 "query": ",".join(f"{item['text']} : {item['value']}" for item in options),
                 "options": options, "current": current.copy(), "multi": False,
                 "includeAll": False, "hide": 0, "skipUrlSync": False}
@@ -105,21 +106,21 @@ def live_dashboard():
     ]
     for index, (title, signal, dbc, unit) in enumerate(overview):
         message = next(item for item in catalog if item["bus"] == "can0" and
-                       item["dbc"] == dbc and signal in item["signals"])
+                       item["dbc"] == dbc and signal == item["signal"])
         fields = [f"signal.{signal}"]
         panels.append(_panel(index + 1, title,
                              {"x": (index % 2) * 12, "y": (index // 2) * 7, "w": 12, "h": 7},
                              _target(namespace, message["channel"], fields=fields),
                              unit=unit))
-    selected = _panel(5, "Selected message â€” decoded samples",
+    selected = _panel(5, "Selected signal - decoded samples",
                       {"x": 0, "y": 14, "w": 16, "h": 9},
-                      _target(namespace, "${can_message}"))
+                      _target(namespace, "${can_signal}"))
     selected["transformations"] = [{"id": "filterFieldsByName", "options": {
         "include": {"pattern": "^(Time|time|signal\\..*)$"}}}]
     panels.append(selected)
-    values = _panel(6, "Selected message â€” latest values",
+    values = _panel(6, "Selected signal - latest values",
                     {"x": 16, "y": 14, "w": 8, "h": 9},
-                    _target(namespace, "${can_message}"), kind="table")
+                    _target(namespace, "${can_signal}"), kind="table")
     values["transformations"] = [{"id": "reduce", "options": {
         "reducers": ["lastNotNull"], "mode": "seriesToRows"}}]
     panels.append(values)

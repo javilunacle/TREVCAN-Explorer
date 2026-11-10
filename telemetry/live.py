@@ -17,9 +17,9 @@ from urllib.parse import urlsplit
 from .common import point_line
 
 
-def live_measurement(bus, can_id, is_extended):
+def live_measurement(bus, signal, can_id, is_extended):
     """Stable, bus-aware channel path, independent of signal value or stream ID."""
-    return f"{bus}_{can_id:08x}_{'ext' if is_extended else 'std'}"
+    return f"{bus}_{signal}_{can_id:08x}_{'ext' if is_extended else 'std'}"
 
 
 def stream_namespace(url):
@@ -44,7 +44,7 @@ def _string(value):
 
 
 def live_lines(frames):
-    """One raw record and one wide decoded record per CAN sample, without reduction."""
+    """One raw record and one decoded record per signal, without reduction."""
     # Preserve the existing Grafana "car" field/tag name; its value now comes
     # from stream_id, consistently with the historical InfluxDB schema.
     lines = []
@@ -79,8 +79,8 @@ def live_lines(frames):
             f"{','.join(fields)} {frame['timestamp_ns']}")
         if not signals:
             continue
-        signal_fields = []
         for name, value in signals.items():
+            signal_fields = []
             if name in labels:
                 signal_fields.append(f"{_tag('state.' + name)}={_string(labels[name])}")
             if isinstance(value, (int, float)):
@@ -89,11 +89,11 @@ def live_lines(frames):
                     signal_fields.append(f"{_tag('signal.' + name)}={number}")
             else:
                 signal_fields.append(f"{_tag('state.' + name)}={_string(value)}")
-        if signal_fields:
-            measurement = live_measurement(bus, frame["can_id"], frame["is_extended"])
-            lines.append(
-                f"{measurement},car={_tag(frame['stream_id'])} "
-                f"{','.join(signal_fields)} {frame['timestamp_ns']}")
+            if signal_fields:
+                measurement = live_measurement(bus, name, frame["can_id"], frame["is_extended"])
+                lines.append(
+                    f"{measurement},car={_tag(frame['stream_id'])} "
+                    f"{','.join(signal_fields)} {frame['timestamp_ns']}")
     return "\n".join(lines) + ("\n" if lines else "")
 
 

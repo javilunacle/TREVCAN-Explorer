@@ -16,15 +16,15 @@ directory:
 
 **Live Telemetry** uses the built-in `-- Grafana --` data source's Live
 Measurements queries, with no InfluxDB queries or polling selectors. The
-receiver pushes small batches to `/api/live/push/trevcan`. A message has a
-bus/ID/extended-aware channel, such as `stream/trevcan/can0_000000a0_std`.
-Wide fields `signal.NAME` carry every numeric decoded update; `state.NAME`
+receiver pushes small batches to `/api/live/push/trevcan`. Each signal has a
+bus/signal/ID/extended-aware channel, such as `stream/trevcan/can0_INV_Motor_Speed_000000a0_std`.
+Fields `signal.NAME` carry every numeric decoded update; `state.NAME`
 preserves textual/enum labels. `stream/trevcan/can_frames` carries every fresh
 raw frame with its bus, ID, sequence, bytes, DBC, and decoded summary. Capture
 timestamps are preserved. Synthetic scenarios use `trevcan_synthetic` instead.
 
-The Live dashboard includes four key vehicle graphs, a static DBC-message
-selector, selected-message samples/latest values, recent raw frames, and a
+The Live dashboard includes four key vehicle graphs, a static DBC-signal
+selector, selected-signal samples/latest values, recent raw frames, and a
 calculated-signal selector/graph. Calculated signals use channels such as
 `stream/trevcan/derived_Vehicle_Speed_mps`. The browser keeps a bounded recent
 window starting when the viewer subscribes; it does not load the entire run. Use capture timestamps to assess stale
